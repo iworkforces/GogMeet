@@ -45,11 +45,7 @@ export default defineConfig({
             provider: "v8",
             reporter: ["text", "json-summary"],
             include: ["src/main/**/*.ts"],
-            exclude: [
-              "src/main/**/*.d.ts",
-              "src/main/**/*.swift",
-              ...PLATFORM_EDGE_EXCLUDES,
-            ],
+            exclude: ["src/main/**/*.d.ts", "src/main/**/*.swift", ...PLATFORM_EDGE_EXCLUDES],
             thresholds: {
               lines: 90,
               statements: 90,
@@ -78,6 +74,14 @@ export default defineConfig({
               branches: 50,
             },
           },
+        },
+      },
+      {
+        test: {
+          name: "vertical",
+          environment: "jsdom",
+          include: ["tests/vertical/**/*.test.ts"],
+          setupFiles: ["./tests/setup.as.ts"],
         },
       },
       {
