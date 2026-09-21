@@ -1,42 +1,53 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, expect, it } from "vitest";
+import { isLateJoinEligible } from "../../src/main/scheduler/late-join.js";
 import {
-  getLateJoinGraceMs,
-  isLateJoinEligible,
-  _setLateJoinGraceMsForTest,
-} from "../../src/main/scheduler/late-join.js";
-import { asTestEventId, asTestMeetUrl, createMockEvent } from "../helpers/test-utils.js";
+  asTestEventId,
+  asTestIsoUtc,
+  asTestMeetUrl,
+  createMockEvent,
+} from "../helpers/test-utils.js";
 
-describe("late-join helpers", () => {
-  beforeEach(() => {
-    _setLateJoinGraceMsForTest(null);
+const NOW = new Date("2026-06-18T12:00:00.000Z").getTime();
+const START = NOW - 60_000;
+const END = NOW + 30 * 60_000;
+
+function event(overrides = {}) {
+  return createMockEvent({
+    id: asTestEventId("late"),
+    meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
+    startDate: asTestIsoUtc(new Date(START).toISOString()),
+    endDate: asTestIsoUtc(new Date(END).toISOString()),
+    ...overrides,
+  });
+}
+
+describe("isLateJoinEligible", () => {
+  it.each([
+    ["inside explicit grace", START, END, NOW, 120_000, false, true],
+    ["at grace boundary", START, END, START + 120_000, 120_000, false, false],
+    ["grace disabled", START, END, NOW, 0, false, false],
+    ["before meeting start", START, END, START - 1, 120_000, false, false],
+    ["after meeting end", START, END, END, 60 * 60_000, false, false],
+    ["already fired", START, END, NOW, 120_000, true, false],
+  ])("returns the expected result when %s", (_name, start, end, now, grace, fired, expected) => {
+    const meeting = event();
+    const firedEvents = fired ? new Map([[meeting.id, end]]) : new Map();
+    expect(isLateJoinEligible(meeting, start, end, now, grace, { firedEvents })).toBe(expected);
   });
 
-  it("defaults grace to 0", () => {
-    expect(getLateJoinGraceMs()).toBe(0);
+  it("does not depend on title-countdown cancellation state", () => {
+    const meeting = event();
+    expect(
+      isLateJoinEligible(meeting, START, END, NOW, 120_000, {
+        firedEvents: new Map(),
+      }),
+    ).toBe(true);
   });
 
-  it("allows override for tests", () => {
-    _setLateJoinGraceMsForTest(120_000);
-    expect(getLateJoinGraceMs()).toBe(120_000);
-  });
-
-  it("is eligible only within grace and when not fired", () => {
-    const now = Date.now();
-    const startMs = now - 60_000;
-    const endMs = now + 30 * 60_000;
-    const event = createMockEvent({
-      id: asTestEventId("e1"),
-      meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
-      startDate: new Date(startMs).toISOString(),
-      endDate: new Date(endMs).toISOString(),
-    });
-    const emptyFired = { firedEvents: new Map() };
-    expect(isLateJoinEligible(event, startMs, endMs, now, 120_000, emptyFired)).toBe(true);
-
-    const fired = { firedEvents: new Map([[event.id, endMs]]) };
-    expect(isLateJoinEligible(event, startMs, endMs, now, 120_000, fired)).toBe(false);
-
-    // cancelledEvents is not part of the view — eligibility must not depend on it
-    expect(isLateJoinEligible(event, startMs, endMs, now, 0, emptyFired)).toBe(false);
+  it("evaluates different explicit grace values independently", () => {
+    const meeting = event();
+    const state = { firedEvents: new Map() };
+    expect(isLateJoinEligible(meeting, START, END, NOW, 30_000, state)).toBe(false);
+    expect(isLateJoinEligible(meeting, START, END, NOW, 120_000, state)).toBe(true);
   });
 });
