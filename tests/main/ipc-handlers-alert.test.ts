@@ -1,12 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockCancelPendingBrowserOpen } = vi.hoisted(() => ({
-  mockCancelPendingBrowserOpen: vi.fn(),
-}));
-
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  cancelPendingBrowserOpen: mockCancelPendingBrowserOpen,
-}));
+const mockCancelPendingBrowserOpen = vi.fn();
 
 import { registerAlertHandlers } from "../../src/main/ipc-handlers/alert.js";
 import { ipcMain } from "electron";
@@ -15,6 +9,12 @@ import { authorizedOnEvent } from "../helpers/ipc-sender.js";
 import { testAppGraph } from "../helpers/app-graph.js";
 
 const mockIpcMain = vi.mocked(ipcMain);
+
+function alertGraph() {
+  return testAppGraph({
+    scheduler: { cancelPendingBrowserOpen: mockCancelPendingBrowserOpen },
+  });
+}
 
 function getRegisteredHandler(channel: string) {
   const call = mockIpcMain.on.mock.calls.find((c) => c[0] === channel);
@@ -37,26 +37,23 @@ describe("registerAlertHandlers", () => {
   });
 
   it("registers exactly 1 fire-and-forget handler via ipcMain.on", () => {
-    registerAlertHandlers(testAppGraph());
+    registerAlertHandlers(alertGraph());
     expect(mockIpcMain.on).toHaveBeenCalledTimes(1);
   });
 
   it("registers handler under the alert:dismissed channel", () => {
-    registerAlertHandlers(testAppGraph());
-    expect(mockIpcMain.on).toHaveBeenCalledWith(
-      "alert:dismissed",
-      expect.any(Function),
-    );
+    registerAlertHandlers(alertGraph());
+    expect(mockIpcMain.on).toHaveBeenCalledWith("alert:dismissed", expect.any(Function));
   });
 
   it("does not register via ipcMain.handle (fire-and-forget, not invoke)", () => {
-    registerAlertHandlers(testAppGraph());
+    registerAlertHandlers(alertGraph());
     expect(mockIpcMain.handle).not.toHaveBeenCalled();
   });
 
   describe("alert:dismissed handler", () => {
     it("calls cancelPendingBrowserOpen with the payload id when sender authorized", () => {
-      registerAlertHandlers(testAppGraph());
+      registerAlertHandlers(alertGraph());
       const handler = getRegisteredHandler("alert:dismissed");
       expect(handler).toBeDefined();
 
@@ -68,7 +65,7 @@ describe("registerAlertHandlers", () => {
     });
 
     it("rejects unauthorized https:// sender — cancel not invoked", () => {
-      registerAlertHandlers(testAppGraph());
+      registerAlertHandlers(alertGraph());
       const handler = getRegisteredHandler("alert:dismissed");
 
       const id = asTestEventId("evt-1");
@@ -78,7 +75,7 @@ describe("registerAlertHandlers", () => {
     });
 
     it("rejects unauthorized http:// sender — cancel not invoked", () => {
-      registerAlertHandlers(testAppGraph());
+      registerAlertHandlers(alertGraph());
       const handler = getRegisteredHandler("alert:dismissed");
 
       const id = asTestEventId("evt-1");
@@ -92,7 +89,7 @@ describe("registerAlertHandlers", () => {
         senderFrame: { url: "file:///etc/passwd" },
       }.As<import("electron").IpcMainEvent>();
 
-      registerAlertHandlers(testAppGraph());
+      registerAlertHandlers(alertGraph());
       const handler = getRegisteredHandler("alert:dismissed");
 
       handler!(badFileEvent, { id: asTestEventId("evt-1") });
@@ -101,7 +98,7 @@ describe("registerAlertHandlers", () => {
 
     describe("malformed payload (runtime validation at IPC boundary)", () => {
       it("ignores undefined payload — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, undefined)).not.toThrow();
@@ -109,7 +106,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores null payload — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, null)).not.toThrow();
@@ -117,7 +114,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores empty object payload — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, {})).not.toThrow();
@@ -125,7 +122,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores payload with numeric id — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, { id: 123 })).not.toThrow();
@@ -133,7 +130,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores payload with empty-string id — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, { id: "" })).not.toThrow();
@@ -141,7 +138,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores payload with whitespace-only id — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(authorizedEvent, { id: "   " })).not.toThrow();
@@ -149,7 +146,7 @@ describe("registerAlertHandlers", () => {
       });
 
       it("ignores unauthorized sender with malformed payload — does not throw, does not cancel", () => {
-        registerAlertHandlers(testAppGraph());
+        registerAlertHandlers(alertGraph());
         const handler = getRegisteredHandler("alert:dismissed");
 
         expect(() => handler!(unauthorizedHttpsEvent, undefined)).not.toThrow();
