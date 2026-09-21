@@ -85,6 +85,9 @@ describe("alert join and dismiss", () => {
     await vi.waitFor(() => {
       expect(notifyDismissed).toHaveBeenCalledWith("evt-join-me");
     });
+    const card = document.querySelector(".alert-card");
+    expect(card).not.toBeNull();
+    card?.dispatchEvent(new Event("animationend"));
   });
 
   it("Join failure keeps the alert open with an error banner", async () => {
@@ -127,6 +130,9 @@ describe("alert join and dismiss", () => {
     await vi.waitFor(() => {
       expect(notifyDismissed).toHaveBeenCalledWith("evt-dismiss");
     });
+    const card = document.querySelector(".alert-card");
+    expect(card).not.toBeNull();
+    card?.dispatchEvent(new Event("animationend"));
     expect(joinMeeting).not.toHaveBeenCalled();
   });
 });
