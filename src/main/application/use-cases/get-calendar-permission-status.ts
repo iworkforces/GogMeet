@@ -13,22 +13,28 @@ export interface GetCalendarPermissionStatusDeps {
 }
 
 export interface GetCalendarPermissionStatus {
-  execute(): Promise<CalendarPermission>;
+  execute(signal?: AbortSignal): Promise<CalendarPermission>;
 }
+
+const DEFAULT_SIGNAL = new AbortController().signal;
 
 export function createGetCalendarPermissionStatus(
   deps: GetCalendarPermissionStatusDeps,
 ): GetCalendarPermissionStatus {
   return {
-    async execute(): Promise<CalendarPermission> {
+    async execute(signal: AbortSignal = DEFAULT_SIGNAL): Promise<CalendarPermission> {
+      signal.throwIfAborted();
       if (deps.calendar.isOAuthInFlight?.()) return "not-determined";
       const cached = deps.getCachedPermission();
       if (cached !== null) return cached;
 
       const status = await deps.calendar.getPermissionStatus();
-      deps.setCachedPermission(status);
+      signal.throwIfAborted();
 
       const ui = deps.getUiState();
+      const accountEmail = (await deps.calendar.getAccountLabel?.()) ?? ui.accountEmail;
+      signal.throwIfAborted();
+      deps.setCachedPermission(status);
       const next: Partial<CalendarUiState> = {
         permission: status,
         phase:
@@ -38,7 +44,7 @@ export function createGetCalendarPermissionStatus(
               : "empty"
             : "disconnected",
         oauthConfigured: deps.calendar.isOAuthConfigured?.() ?? false,
-        accountEmail: (await deps.calendar.getAccountLabel?.()) ?? ui.accountEmail,
+        accountEmail,
         darwinPartialRefreshDiagnostics: null,
       };
       deps.setUiState(next);
