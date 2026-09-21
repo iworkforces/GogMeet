@@ -6,16 +6,10 @@ import {
   cancelTitleCountdown,
   pruneCancelledEvents,
 } from "../title-countdown.js";
-import {
-  state,
-  markTitleDirty,
-  markInMeetingDirty,
-  cancelStaleEntries,
-  clearInMeetingState,
-} from "../state/index.js";
+import { cancelStaleEntries, clearInMeetingState } from "../state/index.js";
 import { resolveActiveInMeetingEvent, startInMeetingCountdown } from "../countdown.js";
-import { setLateJoinGraceFromSettings } from "../late-join.js";
 import type { ScheduleAction, SchedulePlan } from "../core/schedule-types.js";
+import type { SchedulerRuntime } from "../runtime.js";
 
 export interface InterpretOptions {
   /** When true, timer callbacks no-op (poll epoch / generation abort). */
@@ -25,42 +19,45 @@ export interface InterpretOptions {
 /**
  * Apply a pure SchedulePlan by mutating scheduler state and arming timers.
  */
-export function interpretSchedulePlan(plan: SchedulePlan, options: InterpretOptions): void {
+export function interpretSchedulePlan(
+  runtime: SchedulerRuntime,
+  plan: SchedulePlan,
+  options: InterpretOptions,
+): void {
   const { shouldAbort } = options;
 
   for (const action of plan.actions) {
-    applyAction(action, shouldAbort);
+    applyAction(runtime, action, shouldAbort);
   }
 }
 
-function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
-  const s = state;
+function applyAction(
+  runtime: SchedulerRuntime,
+  action: ScheduleAction,
+  shouldAbort: () => boolean,
+): void {
+  const s = runtime.state;
 
   switch (action.type) {
-    case "set-late-join-grace":
-      setLateJoinGraceFromSettings(action.graceMs / 60_000);
-      break;
-
     case "arm-browser":
       scheduleBrowserTimer(
+        runtime,
         action.event,
         action.delayMs,
         action.openAtMs,
         action.startMs,
         action.endMs,
-        s.timers,
-        s.firedEvents,
+        action.graceMs,
         { nativeNotifications: action.notify },
       );
       break;
 
     case "arm-alert":
       scheduleAlertTimer(
+        runtime,
         action.event,
         action.delayMs,
         action.endMs,
-        s.alertTimers,
-        s.alertFiredEvents,
         shouldAbort,
         action.alertLeadMs,
         action.openAtMs,
@@ -69,6 +66,7 @@ function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
 
     case "arm-title":
       scheduleTitleCountdown(
+        runtime,
         {
           eventId: action.eventId,
           eventTitle: action.eventTitle,
@@ -90,7 +88,10 @@ function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
         startMs: action.startMs,
         endMs: action.endMs,
       });
-      startInMeetingCountdown(action.eventId, { title: action.title, endMs: action.endMs });
+      startInMeetingCountdown(runtime, action.eventId, {
+        title: action.title,
+        endMs: action.endMs,
+      });
       break;
 
     case "cancel-browser":
@@ -102,7 +103,13 @@ function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
       break;
 
     case "cancel-title":
-      cancelTitleCountdown(action.eventId, s.titleTimers, s.countdownIntervals, s.clearTimers);
+      cancelTitleCountdown(
+        runtime,
+        action.eventId,
+        s.titleTimers,
+        s.countdownIntervals,
+        s.clearTimers,
+      );
       break;
 
     case "clear-fired":
@@ -136,11 +143,11 @@ function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
     }
 
     case "mark-title-dirty":
-      markTitleDirty();
+      s.titleDirty = true;
       break;
 
     case "mark-in-meeting-dirty":
-      markInMeetingDirty();
+      s.inMeetingDirty = true;
       break;
 
     case "prune-absent": {
@@ -152,13 +159,13 @@ function applyAction(action: ScheduleAction, shouldAbort: () => boolean): void {
         onBrowserCancel: cancelBrowserTimer,
         onAlertCancel: cancelAlertTimer,
         onCountdownIntervalCancel,
-        onPruneCancelledEvents: pruneCancelledEvents,
+        onPruneCancelledEvents: (activeIds) => pruneCancelledEvents(runtime, activeIds),
       });
       break;
     }
 
     case "resolve-active-in-meeting":
-      resolveActiveInMeetingEvent();
+      resolveActiveInMeetingEvent(runtime);
       break;
 
     default: {

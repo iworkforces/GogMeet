@@ -34,8 +34,6 @@ export function planSchedule(
   const activeIds = new Set<EventId>();
   const graceMs = options.lateJoinGraceMs;
 
-  actions.push({ type: "set-late-join-grace", graceMs });
-
   for (const event of events) {
     if (event.isAllDay) continue;
 
@@ -135,6 +133,7 @@ function planInProgressEvent(
       startMs,
       endMs,
       notify: settings.nativeNotifications && !quiet,
+      graceMs,
     });
   }
 
@@ -299,6 +298,7 @@ function planFutureTimers(
       startMs,
       endMs,
       notify: settings.nativeNotifications && !quiet,
+      graceMs: settings.lateJoinGraceMinutes * 60_000,
     });
   }
 

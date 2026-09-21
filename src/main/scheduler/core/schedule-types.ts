@@ -6,7 +6,6 @@ export type { ScheduledEventSnapshot };
 
 /** Pure scheduling decisions produced by planSchedule. */
 export type ScheduleAction =
-  | { type: "set-late-join-grace"; graceMs: number }
   | {
       type: "arm-browser";
       event: MeetingEvent;
@@ -15,6 +14,7 @@ export type ScheduleAction =
       startMs: number;
       endMs: number;
       notify: boolean;
+      graceMs: number;
     }
   | {
       type: "arm-alert";
