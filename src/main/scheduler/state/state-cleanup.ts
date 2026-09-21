@@ -33,7 +33,7 @@ export function clearInMeetingState(s: SchedulerState, eventId: EventId): void {
 
 export function clearSchedulerResources(
   s: SchedulerState,
-  options?: { preserveFiredState?: boolean },
+  options?: { preserveFiredState?: boolean; preserveLastKnownEvents?: boolean },
 ): void {
   if (s.pollTimeout !== null) {
     clearTimeout(s.pollTimeout);
@@ -51,7 +51,9 @@ export function clearSchedulerResources(
     clearAllTimers(s);
   }
 
-  s.lastKnownEvents = null;
+  if (options?.preserveLastKnownEvents !== true) {
+    s.lastKnownEvents = null;
+  }
 }
 
 /**
