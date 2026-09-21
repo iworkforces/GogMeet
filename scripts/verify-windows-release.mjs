@@ -16,6 +16,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyWindowsLatestYml } from "./windows-latest-yml-verifier.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(root, "dist");
@@ -85,8 +86,7 @@ export function verifyWindowsReleaseInventory(opts = {}) {
     }
   }
 
-  const requireYml =
-    opts.requireUpdaterYml === true || process.env["REQUIRE_UPDATER_YML"] === "1";
+  const requireYml = opts.requireUpdaterYml === true || process.env["REQUIRE_UPDATER_YML"] === "1";
   if (requireYml) {
     const ymlPath = join(dir, "latest.yml");
     if (!existsSync(ymlPath)) {
@@ -98,17 +98,18 @@ export function verifyWindowsReleaseInventory(opts = {}) {
         message: "REQUIRE_UPDATER_YML=1 but dist/latest.yml is missing",
       };
     }
-    const yml = readFileSync(ymlPath, "utf-8");
-    const nsisX64 = `GogMeet-${version}-x64.exe`;
-    const nsisArm64 = `GogMeet-${version}-arm64.exe`;
-    if (!yml.includes(nsisX64) || !yml.includes(nsisArm64)) {
+    const validation = verifyWindowsLatestYml({
+      metadata: readFileSync(ymlPath, "utf-8"),
+      version,
+      distDir: dir,
+    });
+    if (!validation.ok) {
       return {
         ok: false,
         version,
         expected,
         missing: [],
-        message:
-          "latest.yml must list both NSIS arches (x64 and arm64) for multi-arch updates (K25)",
+        message: validation.message,
       };
     }
   }
@@ -131,17 +132,12 @@ function main() {
     }
     console.log(`[verify-windows-release] ${result.message}`);
   } catch (err) {
-    console.error(
-      "[verify-windows-release]",
-      err instanceof Error ? err.message : err,
-    );
+    console.error("[verify-windows-release]", err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
 
-const isMain =
-  process.argv[1] &&
-  fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 
 if (isMain) {
   main();
