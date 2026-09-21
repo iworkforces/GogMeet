@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
 import type { ScheduledEventSnapshot } from "../../src/main/scheduler/state/index.js";
-import { asTestEventId } from "../helpers/test-utils.js";
+import { asTestEventId, asTestMeetUrl } from "../helpers/test-utils.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import type { SchedulerState } from "../../src/main/scheduler/state/index.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 // Mock power module
 vi.mock("../../src/main/system/power.js", () => ({
@@ -15,45 +17,67 @@ vi.mock("electron", () => ({
   app: { getPath: vi.fn().mockReturnValue("/tmp/test") },
 }));
 
-// Mock settings
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi
-    .fn()
-    .mockReturnValue({
-    schemaVersion: 3,
-    openBeforeMinutes: 1,
-    launchAtLogin: false,
-    showTomorrowMeetings: true,
-    showCompletedTodayMeetings: false,
-    windowAlert: true,
-    autoOpenEnabled: true,
-    alertLeadSeconds: 60,
-    nativeNotifications: true,
-    lateJoinGraceMinutes: 0,
-    quietHoursEnabled: false,
-    quietHoursStart: "22:00",
-    quietHoursEnd: "07:00",
-  }),
-}));
-
 const {
-  state,
-  markTitleDirty,
-} = await import("../../src/main/scheduler/state/index.js");
-
-const {
-  resolveActiveTitleEvent,
-  resolveActiveInMeetingEvent,
-  startInMeetingCountdown,
-  clearAllDisplayTimers,
+  resolveActiveTitleEvent: resolveActiveTitleEventImpl,
+  resolveActiveInMeetingEvent: resolveActiveInMeetingEventImpl,
+  startInMeetingCountdown: startInMeetingCountdownImpl,
+  clearAllDisplayTimers: clearAllDisplayTimersImpl,
 } = await import("../../src/main/scheduler/countdown.js");
 
-function makeSnapshot(
-  overrides: Partial<ScheduledEventSnapshot> = {},
-): ScheduledEventSnapshot {
+let runtime: SchedulerRuntime;
+type TestSchedulerState = Omit<
+  SchedulerState,
+  | "countdownIntervals"
+  | "scheduledEventData"
+  | "inMeetingIntervals"
+  | "inMeetingEndTimers"
+  | "clearTimers"
+  | "activeTitleEventId"
+  | "activeInMeetingEventId"
+> & {
+  countdownIntervals: Map<string, ReturnType<typeof setInterval>>;
+  scheduledEventData: Map<string, ScheduledEventSnapshot>;
+  inMeetingIntervals: Map<string, ReturnType<typeof setInterval>>;
+  inMeetingEndTimers: Map<string, ReturnType<typeof setTimeout>>;
+  clearTimers: Map<string, ReturnType<typeof setTimeout>>;
+  activeTitleEventId: string | null;
+  activeInMeetingEventId: string | null;
+};
+let state: TestSchedulerState;
+
+beforeEach(() => {
+  runtime = schedulerTestContext().runtime;
+  state = runtime.state.As<TestSchedulerState>();
+});
+
+function markTitleDirty(): void {
+  state.titleDirty = true;
+}
+
+function resolveActiveTitleEvent(): void {
+  resolveActiveTitleEventImpl(runtime);
+}
+
+function resolveActiveInMeetingEvent(): void {
+  resolveActiveInMeetingEventImpl(runtime);
+}
+
+function startInMeetingCountdown(
+  eventId: string,
+  data: { readonly title: string; readonly endMs: number },
+): void {
+  startInMeetingCountdownImpl(runtime, asTestEventId(eventId), data);
+}
+
+function clearAllDisplayTimers(): void {
+  clearAllDisplayTimersImpl(runtime);
+}
+
+function makeSnapshot(overrides: Partial<ScheduledEventSnapshot> = {}): ScheduledEventSnapshot {
   return {
     title: "Test Meeting",
-    meetUrl: "https://meet.google.com/abc",
+    meetUrl: asTestMeetUrl("https://meet.google.com/abc"),
+    openAtMs: Date.now() + 9 * 60 * 1000,
     startMs: Date.now() + 10 * 60 * 1000,
     endMs: Date.now() + 40 * 60 * 1000,
     ...overrides,
@@ -141,10 +165,7 @@ describe("resolveActiveTitleEvent", () => {
     resolveActiveTitleEvent();
 
     expect(state.activeTitleEventId).toBe("B");
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "Meeting B",
-      expect.any(Number),
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("Meeting B", expect.any(Number));
     expect(state.titleDirty).toBe(false);
 
     clearInterval(state.countdownIntervals.get("A")!);
@@ -191,10 +212,7 @@ describe("resolveActiveTitleEvent", () => {
     markTitleDirty();
     expect(state.titleDirty).toBe(true);
     resolveActiveTitleEvent();
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "My Meeting",
-      expect.any(Number),
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("My Meeting", expect.any(Number));
 
     clearInterval(state.countdownIntervals.get("evt-1")!);
     state.countdownIntervals.clear();
@@ -279,11 +297,7 @@ describe("resolveActiveInMeetingEvent", () => {
     resolveActiveInMeetingEvent();
 
     expect(state.activeInMeetingEventId).toBe("B");
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "Meeting B",
-      expect.any(Number),
-      true,
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("Meeting B", expect.any(Number), true);
     expect(state.inMeetingDirty).toBe(false);
 
     clearInterval(state.inMeetingIntervals.get("A")!);
@@ -333,10 +347,8 @@ describe("startInMeetingCountdown", () => {
   });
 
   afterEach(() => {
-    for (const handle of state.inMeetingIntervals.values())
-      clearInterval(handle);
-    for (const handle of state.inMeetingEndTimers.values())
-      clearTimeout(handle);
+    for (const handle of state.inMeetingIntervals.values()) clearInterval(handle);
+    for (const handle of state.inMeetingEndTimers.values()) clearTimeout(handle);
     state.inMeetingIntervals.clear();
     state.inMeetingEndTimers.clear();
     state.scheduledEventData.clear();
@@ -369,10 +381,7 @@ describe("startInMeetingCountdown", () => {
   it("resolves active in-meeting event after starting", () => {
     const now = Date.now();
     const endMs = now + 30 * 60 * 1000;
-    state.scheduledEventData.set(
-      "evt-1",
-      makeSnapshot({ title: "Meeting", endMs }),
-    );
+    state.scheduledEventData.set("evt-1", makeSnapshot({ title: "Meeting", endMs }));
 
     startInMeetingCountdown("evt-1", { title: "Meeting", endMs });
 
@@ -383,10 +392,7 @@ describe("startInMeetingCountdown", () => {
   it("per-minute tick updates tray with remaining time (in-meeting)", () => {
     const now = Date.now();
     const endMs = now + 15 * 60 * 1000;
-    state.scheduledEventData.set(
-      "evt-1",
-      makeSnapshot({ title: "Meeting", endMs }),
-    );
+    state.scheduledEventData.set("evt-1", makeSnapshot({ title: "Meeting", endMs }));
 
     startInMeetingCountdown("evt-1", { title: "Meeting", endMs });
     vi.mocked(state.onTrayTitleUpdate!).mockClear();
@@ -394,20 +400,13 @@ describe("startInMeetingCountdown", () => {
     // Advance 1 minute — tick fires
     vi.advanceTimersByTime(60_000);
 
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "Meeting",
-      expect.any(Number),
-      true,
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("Meeting", expect.any(Number), true);
   });
 
   it("per-minute tick is suppressed when event does not own in-meeting title", () => {
     const now = Date.now();
     const endMs = now + 15 * 60 * 1000;
-    state.scheduledEventData.set(
-      "evt-1",
-      makeSnapshot({ title: "Meeting", endMs }),
-    );
+    state.scheduledEventData.set("evt-1", makeSnapshot({ title: "Meeting", endMs }));
 
     startInMeetingCountdown("evt-1", { title: "Meeting", endMs });
 
@@ -423,10 +422,7 @@ describe("startInMeetingCountdown", () => {
   it("cleans up at meeting end and re-resolves", () => {
     const now = Date.now();
     const endMs = now + 5 * 60 * 1000;
-    state.scheduledEventData.set(
-      "evt-1",
-      makeSnapshot({ title: "Short Meeting", endMs }),
-    );
+    state.scheduledEventData.set("evt-1", makeSnapshot({ title: "Short Meeting", endMs }));
 
     startInMeetingCountdown("evt-1", { title: "Short Meeting", endMs });
 
