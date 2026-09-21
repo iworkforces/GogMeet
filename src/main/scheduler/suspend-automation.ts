@@ -4,20 +4,16 @@
  * while leaving lastKnownEvents untouched for display and explicit joins.
  */
 
-import {
-  state,
-  markTitleDirty,
-  markInMeetingDirty,
-  setActiveInMeetingEventId,
-} from "./state/index.js";
 import { resolveActiveTitleEvent } from "./countdown.js";
+import type { SchedulerRuntime } from "./runtime.js";
 
 /**
  * Cancel all pending automatic browser / alert / title / countdown / late-join /
  * in-meeting work and return sleep ownership to zero for pre-meeting countdowns.
  * Does **not** clear `lastKnownEvents` or fired-suppression maps.
  */
-export function suspendAutomation(): void {
+export function suspendAutomation(runtime: SchedulerRuntime): void {
+  const { state } = runtime;
   for (const handle of state.timers.values()) clearTimeout(handle);
   state.timers.clear();
 
@@ -45,10 +41,10 @@ export function suspendAutomation(): void {
 
   state.scheduledEventData.clear();
   state.cancelledEvents.clear();
-  setActiveInMeetingEventId(null);
-  markTitleDirty();
-  markInMeetingDirty();
-  resolveActiveTitleEvent();
+  state.activeInMeetingEventId = null;
+  state.titleDirty = true;
+  state.inMeetingDirty = true;
+  resolveActiveTitleEvent(runtime);
 
   console.debug("[scheduler] Suspended automation for degraded calendar result");
 }
