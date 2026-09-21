@@ -55,21 +55,19 @@ vi.mock("electron", () => {
   };
 });
 
-// Mock scheduler facade — alert-window calls cancelPendingBrowserOpen on user-dismissal
-const mockCancelPendingBrowserOpen = vi.fn();
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  cancelPendingBrowserOpen: mockCancelPendingBrowserOpen,
-}));
-
-
-let showAlert: typeof import("../../src/main/windows/alert-window.js").showAlert;
+let showAlertPresentation: typeof import("../../src/main/windows/alert-window.js").showAlert;
 let destroyAlertWindow: typeof import("../../src/main/windows/alert-window.js").destroyAlertWindow;
 import { BrowserWindow, app } from "electron";
+import type { IsoUtc } from "../../src/domain/entities/brand.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
 import { createMockEvent } from "../helpers/test-utils.js";
 
 function makeEvent(overrides: Partial<MeetingEvent> = {}): MeetingEvent {
   return createMockEvent({ id: "test-1", ...overrides });
+}
+
+function showAlert(event: MeetingEvent, autoOpenAt?: IsoUtc): void {
+  showAlertPresentation(event, () => undefined, autoOpenAt);
 }
 
 /** Get the nth BrowserWindow instance created (1-indexed) */
@@ -106,9 +104,9 @@ describe("alert-window", () => {
     vi.resetModules();
     vi.useFakeTimers();
     delete process.env.VITE_DEV_SERVER_URL;
-    ({ showAlert, destroyAlertWindow } = await import(
-      "../../src/main/windows/alert-window.js"
-    ));
+    const alertWindow = await import("../../src/main/windows/alert-window.js");
+    showAlertPresentation = alertWindow.showAlert;
+    destroyAlertWindow = alertWindow.destroyAlertWindow;
   });
 
   afterEach(() => {
@@ -472,27 +470,75 @@ describe("alert-window", () => {
 
     describe("close-handler cancels pending browser-open", () => {
       it("cancels pending browser-open when user dismisses alert", () => {
-        showAlert(makeEvent({ id: "dismiss-me" }));
+        const onDismiss = vi.fn();
+        showAlertPresentation(makeEvent({ id: "dismiss-me" }), onDismiss);
         const win = getWindow(1);
         fireEvent(win, "close");
-        expect(mockCancelPendingBrowserOpen).toHaveBeenCalledTimes(1);
-        expect(mockCancelPendingBrowserOpen).toHaveBeenCalledWith("dismiss-me");
+        expect(onDismiss).toHaveBeenCalledTimes(1);
       });
 
       it("does NOT cancel browser-open when reschedule reuses the window", () => {
-        showAlert(makeEvent({ id: "resched", startDate: "2026-05-11T10:00:00Z" }));
+        const firstDismiss = vi.fn();
+        const rescheduledDismiss = vi.fn();
+        showAlertPresentation(
+          makeEvent({ id: "resched", startDate: "2026-05-11T10:00:00Z" }),
+          firstDismiss,
+        );
         const win1 = getWindow(1);
         win1.__alertStartMs = new Date("2026-05-11T10:00:00Z").getTime();
-        showAlert(makeEvent({ id: "resched", startDate: "2026-05-11T14:00:00Z" }));
+        showAlertPresentation(
+          makeEvent({ id: "resched", startDate: "2026-05-11T14:00:00Z" }),
+          rescheduledDismiss,
+        );
         // No close path — reuse only
-        expect(mockCancelPendingBrowserOpen).not.toHaveBeenCalled();
+        expect(firstDismiss).not.toHaveBeenCalled();
+        expect(rescheduledDismiss).not.toHaveBeenCalled();
         expect(win1.close).not.toHaveBeenCalled();
       });
 
       it("does NOT cancel browser-open on force destroy", () => {
-        showAlert(makeEvent({ id: "force-no-cancel" }));
+        const onDismiss = vi.fn();
+        showAlertPresentation(makeEvent({ id: "force-no-cancel" }), onDismiss);
         destroyAlertWindow();
-        expect(mockCancelPendingBrowserOpen).not.toHaveBeenCalled();
+        expect(onDismiss).not.toHaveBeenCalled();
+      });
+
+      it("keeps the owning dismiss handler for each queued presentation", async () => {
+        const firstDismiss = vi.fn();
+        const secondDismiss = vi.fn();
+        showAlertPresentation(makeEvent({ id: "owner-first" }), firstDismiss);
+        const win = getWindow(1);
+        showAlertPresentation(makeEvent({ id: "owner-second" }), secondDismiss);
+
+        fireEvent(win, "close");
+        expect(firstDismiss).toHaveBeenCalledTimes(1);
+        expect(secondDismiss).not.toHaveBeenCalled();
+
+        await vi.runAllTimersAsync();
+        fireEvent(win, "close");
+        expect(firstDismiss).toHaveBeenCalledTimes(1);
+        expect(secondDismiss).toHaveBeenCalledTimes(1);
+      });
+
+      it("uses the replacement presentation handler after reschedule", () => {
+        const firstDismiss = vi.fn();
+        const replacementDismiss = vi.fn();
+        const firstStart = "2026-05-11T10:00:00Z";
+        showAlertPresentation(
+          makeEvent({ id: "replacement-owner", startDate: firstStart }),
+          firstDismiss,
+        );
+        const win = getWindow(1);
+        win.__alertStartMs = new Date(firstStart).getTime();
+
+        showAlertPresentation(
+          makeEvent({ id: "replacement-owner", startDate: "2026-05-11T14:00:00Z" }),
+          replacementDismiss,
+        );
+        fireEvent(win, "close");
+
+        expect(firstDismiss).not.toHaveBeenCalled();
+        expect(replacementDismiss).toHaveBeenCalledTimes(1);
       });
     });
   });
@@ -653,24 +699,25 @@ describe("alert-window", () => {
     });
 
     it("ignores stale close/closed after a newer window is current", async () => {
-      showAlert(makeEvent({ id: "close-a" }));
+      const dismissA = vi.fn();
+      const dismissB = vi.fn();
+      showAlertPresentation(makeEvent({ id: "close-a" }), dismissA);
       const winA = getWindow(1);
       // True destroy path leaves A without being the current ref.
       fireEvent(winA, "closed");
-      mockCancelPendingBrowserOpen.mockClear();
 
-      showAlert(makeEvent({ id: "close-b" }));
+      showAlertPresentation(makeEvent({ id: "close-b" }), dismissB);
       const winB = getWindow(2);
       expect(BrowserWindow).toHaveBeenCalledTimes(2);
 
       // Stale A close must not cancel browser-open for B.
       fireEvent(winA, "close");
-      expect(mockCancelPendingBrowserOpen).not.toHaveBeenCalled();
+      expect(dismissA).not.toHaveBeenCalled();
+      expect(dismissB).not.toHaveBeenCalled();
 
       // Current B dismiss still cancels once.
       fireEvent(winB, "close");
-      expect(mockCancelPendingBrowserOpen).toHaveBeenCalledTimes(1);
-      expect(mockCancelPendingBrowserOpen).toHaveBeenCalledWith("close-b");
+      expect(dismissB).toHaveBeenCalledTimes(1);
     });
   });
 });
