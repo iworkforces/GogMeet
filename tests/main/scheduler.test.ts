@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
+import type { MeetUrl } from "../../src/domain/entities/brand.js";
+import type { BrowserWindow } from "electron";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import type { SchedulerFacade } from "../../src/main/scheduler/facade.js";
+import type { ScheduledEventSnapshot } from "../../src/main/scheduler/state/state-timers.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 import { asTestEventId, asTestIsoUtc, createMockEvent } from "../helpers/test-utils.js";
 
 // Mock electron before importing scheduler
@@ -17,16 +23,6 @@ vi.mock("electron", () => {
   };
 });
 
-// Mock calendar module
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  reportCalendarPollError: vi.fn(),
-  refreshCalendarPublication: vi.fn().mockResolvedValue({
-    publicationGeneration: 1,
-    result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] },
-  }),
-  getLastPublication: vi.fn().mockReturnValue(null),
-}));
-
 // Mock tray module so updateTrayTitle can be spied on
 vi.mock("../../src/main/tray.js", () => ({
   updateTrayTitle: vi.fn(),
@@ -39,69 +35,129 @@ vi.mock("../../src/main/system/power.js", () => ({
   allowSleep: vi.fn(),
 }));
 
-// Mock settings module — scheduler reads openBeforeMinutes via getSettings()
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi.fn().mockReturnValue({
-    schemaVersion: 3,
-    openBeforeMinutes: 3,
-    launchAtLogin: false,
-    showTomorrowMeetings: true,
-    showCompletedTodayMeetings: false,
-    windowAlert: true,
-    autoOpenEnabled: true,
-    alertLeadSeconds: 60,
-    nativeNotifications: true,
-    lateJoinGraceMinutes: 0,
-    quietHoursEnabled: false,
-    quietHoursStart: "22:00",
-    quietHoursEnd: "07:00",
-  }),
-  loadSettings: vi.fn().mockResolvedValue({ ok: true, value: {} }),
-}));
-
 // Mock alert window so we can assert showAlert was invoked by the alert timer
 vi.mock("../../src/main/windows/alert-window.js", () => ({
   showAlert: vi.fn(),
 }));
 
 const mockUpdateTrayTitle = vi.fn();
-// Import directly from actual export locations (not re-exports)
 const schedulerModule = await import("../../src/main/scheduler/index.js");
-const { scheduleEvents } = schedulerModule;
+const { scheduleEvents: scheduleEventsImpl } = schedulerModule;
 const facadeModule = await import("../../src/main/scheduler/facade.js");
-const { setSchedulerWindow, setTrayTitleCallback } = facadeModule;
+const { createSchedulerFacade } = facadeModule;
 const pollModule = await import("../../src/main/scheduler/poll.js");
-const { poll, _resetForTest } = pollModule;
+const { poll: pollImpl } = pollModule;
 const { showAlert: mockShowAlert } = await import("../../src/main/windows/alert-window.js");
-const { getSettings: mockGetSettings } = await import("../../src/main/facades/settings.js");
+const mockGetSettings = vi.fn().mockReturnValue({
+  ...DEFAULT_SETTINGS,
+  openBeforeMinutes: 3,
+});
 
-const stateModule = await import("../../src/main/scheduler/state/index.js");
-const {
-  markTitleDirty,
-  getTimers,
-  getAlertTimers,
-  getTitleTimers,
-  getCountdownIntervals,
-  getClearTimers,
-  getInMeetingIntervals,
-  getInMeetingEndTimers,
-  getActiveInMeetingEventId,
-  getFiredEvents,
-  getAlertFiredEvents,
-  getScheduledEventData,
-} = stateModule;
-const { initPowerCallbacks } = facadeModule;
-// Live references to current state Maps/Sets — re-bound in each beforeEach after _resetForTest()
-let timers = getTimers();
-let alertTimers = getAlertTimers();
-let titleTimers = getTitleTimers();
-let countdownIntervals = getCountdownIntervals();
-let clearTimers = getClearTimers();
-let inMeetingIntervals = getInMeetingIntervals();
-let inMeetingEndTimers = getInMeetingEndTimers();
-let firedEvents = getFiredEvents();
-let alertFiredEvents = getAlertFiredEvents();
-let scheduledEventData = getScheduledEventData();
+let runtime: SchedulerRuntime;
+let facade: SchedulerFacade;
+let refreshCalendarPublication: ReturnType<typeof schedulerTestContext>["refresh"];
+
+function createFreshFixture(): void {
+  const context = schedulerTestContext(() => mockGetSettings());
+  runtime = context.runtime;
+  facade = createSchedulerFacade(context.dependencies, runtime);
+  refreshCalendarPublication = context.refresh;
+  facade.setTrayTitleCallback(mockUpdateTrayTitle);
+}
+
+function resetFixture(): void {
+  createFreshFixture();
+}
+
+function scheduleEvents(events: readonly MeetingEvent[]): void {
+  scheduleEventsImpl(runtime, events);
+}
+
+function poll() {
+  return pollImpl(runtime);
+}
+
+function initPowerCallbacks(callbacks: NonNullable<typeof runtime.state.powerCallbacks>): void {
+  facade.initPowerCallbacks(callbacks);
+}
+
+function setSchedulerWindow(window: BrowserWindow | null): void {
+  runtime.state.win = window;
+}
+
+function setTrayTitleCallback(
+  callback: (title: string | null, minsRemaining?: number, inMeeting?: boolean) => void,
+): void {
+  facade.setTrayTitleCallback(callback);
+}
+
+function stopScheduler(): void {
+  facade.stop();
+}
+
+type LegacySchedulerState = Omit<
+  SchedulerRuntime["state"],
+  | "timers"
+  | "alertTimers"
+  | "titleTimers"
+  | "countdownIntervals"
+  | "clearTimers"
+  | "inMeetingIntervals"
+  | "inMeetingEndTimers"
+  | "firedEvents"
+  | "alertFiredEvents"
+  | "cancelledEvents"
+  | "scheduledEventData"
+  | "activeTitleEventId"
+  | "activeInMeetingEventId"
+> & {
+  timers: Map<string, ReturnType<typeof setTimeout>>;
+  alertTimers: Map<string, ReturnType<typeof setTimeout>>;
+  titleTimers: Map<string, ReturnType<typeof setTimeout>>;
+  countdownIntervals: Map<string, ReturnType<typeof setInterval>>;
+  clearTimers: Map<string, ReturnType<typeof setTimeout>>;
+  inMeetingIntervals: Map<string, ReturnType<typeof setInterval>>;
+  inMeetingEndTimers: Map<string, ReturnType<typeof setTimeout>>;
+  firedEvents: Map<string, number>;
+  alertFiredEvents: Map<string, number>;
+  cancelledEvents: Set<string>;
+  scheduledEventData: Map<string, ScheduledEventSnapshot>;
+  activeTitleEventId: string | null;
+  activeInMeetingEventId: string | null;
+};
+
+const stateModule = {
+  get state() {
+    return runtime.state.As<LegacySchedulerState>();
+  },
+  getConsecutiveErrors: () => runtime.state.consecutiveErrors,
+};
+
+const getTimers = () => stateModule.state.timers;
+const getAlertTimers = () => stateModule.state.alertTimers;
+const getTitleTimers = () => stateModule.state.titleTimers;
+const getCountdownIntervals = () => stateModule.state.countdownIntervals;
+const getClearTimers = () => stateModule.state.clearTimers;
+const getInMeetingIntervals = () => stateModule.state.inMeetingIntervals;
+const getInMeetingEndTimers = () => stateModule.state.inMeetingEndTimers;
+const getActiveInMeetingEventId = () => runtime.state.activeInMeetingEventId;
+const getFiredEvents = () => stateModule.state.firedEvents;
+const getAlertFiredEvents = () => stateModule.state.alertFiredEvents;
+const getScheduledEventData = () => stateModule.state.scheduledEventData;
+const markTitleDirty = () => {
+  runtime.state.titleDirty = true;
+};
+
+let timers: LegacySchedulerState["timers"];
+let alertTimers: LegacySchedulerState["alertTimers"];
+let titleTimers: LegacySchedulerState["titleTimers"];
+let countdownIntervals: LegacySchedulerState["countdownIntervals"];
+let clearTimers: LegacySchedulerState["clearTimers"];
+let inMeetingIntervals: LegacySchedulerState["inMeetingIntervals"];
+let inMeetingEndTimers: LegacySchedulerState["inMeetingEndTimers"];
+let firedEvents: LegacySchedulerState["firedEvents"];
+let alertFiredEvents: LegacySchedulerState["alertFiredEvents"];
+let scheduledEventData: LegacySchedulerState["scheduledEventData"];
 function refreshStateRefs(): void {
   timers = getTimers();
   alertTimers = getAlertTimers();
@@ -115,15 +171,36 @@ function refreshStateRefs(): void {
   scheduledEventData = getScheduledEventData();
 }
 const countdownModule = await import("../../src/main/scheduler/countdown.js");
-const { resolveActiveTitleEvent, resolveActiveInMeetingEvent } = countdownModule;
+const {
+  resolveActiveTitleEvent: resolveActiveTitleEventImpl,
+  resolveActiveInMeetingEvent: resolveActiveInMeetingEventImpl,
+} = countdownModule;
+const resolveActiveTitleEvent = () => resolveActiveTitleEventImpl(runtime);
+const resolveActiveInMeetingEvent = () => resolveActiveInMeetingEventImpl(runtime);
 
 // Inject mock tray callback into scheduler
-setTrayTitleCallback(mockUpdateTrayTitle);
+createFreshFixture();
+refreshStateRefs();
 
-const { updateTrayTitle } = await import("../../src/main/tray.js");
+type EventOverrides = Omit<Partial<MeetingEvent>, "id" | "startDate" | "endDate" | "meetUrl"> & {
+  id?: string;
+  startDate?: string;
+  endDate?: string;
+  meetUrl?: string;
+};
 
-const makeEvent = (overrides: Partial<MeetingEvent> = {}): MeetingEvent =>
-  createMockEvent(overrides);
+const makeEvent = (overrides: EventOverrides = {}): MeetingEvent => {
+  const event = createMockEvent();
+  return {
+    ...event,
+    ...overrides,
+    id: overrides.id === undefined ? event.id : asTestEventId(overrides.id),
+    startDate:
+      overrides.startDate === undefined ? event.startDate : asTestIsoUtc(overrides.startDate),
+    endDate: overrides.endDate === undefined ? event.endDate : asTestIsoUtc(overrides.endDate),
+    meetUrl: overrides.meetUrl === undefined ? event.meetUrl : overrides.meetUrl.As<MeetUrl>(),
+  };
+};
 
 describe("scheduleEvents", () => {
   beforeEach(() => {
@@ -132,7 +209,7 @@ describe("scheduleEvents", () => {
     firedEvents.clear();
     scheduledEventData.clear();
     countdownIntervals.clear();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(mockUpdateTrayTitle).mockClear();
     initPowerCallbacks({
@@ -148,7 +225,7 @@ describe("scheduleEvents", () => {
     firedEvents.clear();
     scheduledEventData.clear();
     countdownIntervals.clear();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(mockUpdateTrayTitle).mockClear();
     stateModule.state.powerCallbacks = null;
@@ -282,7 +359,8 @@ describe("scheduleEvents", () => {
     firedEvents.set("C", Date.now() + 30 * 60_000 + 15 * 60_000);
     scheduledEventData.set("C", {
       title: "Test Meeting",
-      meetUrl: "https://meet.google.com/abc-def-ghi",
+      meetUrl: event.meetUrl,
+      openAtMs: startMs - 3 * 60_000,
       startMs,
       endMs: startMs + 30 * 60 * 1000, // 30 min duration
     });
@@ -479,9 +557,6 @@ describe("scheduleEvents", () => {
     scheduleEvents([event]);
     expect(timers.has("b10")).toBe(true);
     expect(alertTimers.has("b10")).toBe(true);
-    // Store the old timer handles
-    const oldBrowserHandle = timers.get("b10");
-    const oldAlertHandle = alertTimers.get("b10");
     // Advance 6 min — timers haven't fired yet (alert at 9min, browser at 10min with openBefore=1)
     vi.advanceTimersByTime(6 * 60_000);
     // Now reschedule the same event but with start time in the past (in-progress)
@@ -737,7 +812,6 @@ describe("scheduleEvents", () => {
     expect(countdownIntervals.size).toBe(1);
     vi.mocked(mockUpdateTrayTitle).mockClear();
 
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
     vi.mocked(refreshCalendarPublication).mockResolvedValue({
       publicationGeneration: 1,
       result: { kind: "err", code: "unknown", error: "permission denied" },
@@ -757,7 +831,16 @@ describe("scheduleEvents", () => {
     expect(nullCalls.length).toBeGreaterThanOrEqual(1);
 
     // Reset mock
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
   });
 
   it("E16b: consecutiveErrors resets on success; 2 errors + success leaves tray intact", async () => {
@@ -766,7 +849,6 @@ describe("scheduleEvents", () => {
     scheduleEvents([event]);
     vi.mocked(mockUpdateTrayTitle).mockClear();
 
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
     vi.mocked(refreshCalendarPublication).mockResolvedValue({
       publicationGeneration: 1,
       result: { kind: "err", code: "unknown", error: "permission denied" },
@@ -777,12 +859,30 @@ describe("scheduleEvents", () => {
     expect(stateModule.getConsecutiveErrors()).toBe(2);
 
     // Success — errors reset, tray preserved
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [event],
+      },
+    });
     await poll();
     expect(stateModule.getConsecutiveErrors()).toBe(0);
     expect(countdownIntervals.size).toBe(1);
 
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
   });
 
   it("E18: scheduleEvents([]) immediately clears tray", () => {
@@ -885,7 +985,6 @@ describe("scheduleEvents", () => {
       scheduleEvents([event]);
       expect(preventSleep.mock.calls.length).toBeGreaterThanOrEqual(1);
 
-      const { stopScheduler } = facadeModule;
       stopScheduler();
       expect(allowSleep.mock.calls.length).toBe(preventSleep.mock.calls.length);
     } finally {
@@ -907,7 +1006,10 @@ describe("setSchedulerWindow and poll IPC notification", () => {
   let mockWebContentsSend: ReturnType<typeof vi.fn>;
   let mockWindow: {
     isDestroyed: ReturnType<typeof vi.fn>;
-    webContents: { send: ReturnType<typeof vi.fn> };
+    webContents: {
+      send: ReturnType<typeof vi.fn>;
+      isDestroyed: ReturnType<typeof vi.fn>;
+    };
   };
 
   beforeEach(() => {
@@ -916,7 +1018,7 @@ describe("setSchedulerWindow and poll IPC notification", () => {
     firedEvents.clear();
     scheduledEventData.clear();
     countdownIntervals.clear();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(mockUpdateTrayTitle).mockClear();
     initPowerCallbacks({
@@ -942,25 +1044,47 @@ describe("setSchedulerWindow and poll IPC notification", () => {
     firedEvents.clear();
     scheduledEventData.clear();
     countdownIntervals.clear();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     stateModule.state.powerCallbacks = null;
   });
 
   it("F1: setSchedulerWindow stores window reference for poll to use", async () => {
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     setSchedulerWindow(mockWindow as never);
     await poll();
 
     // IPC now sends events array (empty in this case) instead of undefined
-    expect(mockWebContentsSend).toHaveBeenCalledWith("calendar:result-updated", expect.objectContaining({ publicationGeneration: expect.any(Number), result: expect.objectContaining({ kind: "ok" }) }));
+    expect(mockWebContentsSend).toHaveBeenCalledWith(
+      "calendar:result-updated",
+      expect.objectContaining({
+        publicationGeneration: expect.any(Number),
+        result: expect.objectContaining({ kind: "ok" }),
+      }),
+    );
   });
 
   it("F2: poll does NOT send IPC if window is null", async () => {
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     // Don't set window - it should remain null
     setSchedulerWindow(null as never);
@@ -970,8 +1094,16 @@ describe("setSchedulerWindow and poll IPC notification", () => {
   });
 
   it("F3: poll does NOT send IPC if window is destroyed", async () => {
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     mockWindow.isDestroyed.mockReturnValue(true);
     setSchedulerWindow(mockWindow as never);
@@ -981,7 +1113,6 @@ describe("setSchedulerWindow and poll IPC notification", () => {
   });
 
   it("F4: poll sends error publication on calendar fetch error", async () => {
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
     vi.mocked(refreshCalendarPublication).mockResolvedValue({
       publicationGeneration: 1,
       result: {
@@ -1004,9 +1135,17 @@ describe("setSchedulerWindow and poll IPC notification", () => {
   });
 
   it("F5: poll sends IPC after successful fetch with events", async () => {
-    const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
     const event = makeEvent({ id: "f5-event" });
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [event],
+      },
+    });
 
     setSchedulerWindow(mockWindow as never);
     await poll();
@@ -1019,7 +1158,7 @@ describe("setSchedulerWindow and poll IPC notification", () => {
 describe("Dirty flag for title resolution", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(mockUpdateTrayTitle).mockClear();
     initPowerCallbacks({
@@ -1030,7 +1169,7 @@ describe("Dirty flag for title resolution", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     stateModule.state.powerCallbacks = null;
     vi.mocked(mockUpdateTrayTitle).mockClear();
@@ -1141,7 +1280,7 @@ describe("Dirty flag for title resolution", () => {
 describe("F5: in-progress auto-open suppression after meeting start", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     setSchedulerWindow(null);
     setTrayTitleCallback(mockUpdateTrayTitle);
@@ -1245,7 +1384,7 @@ describe("F5: in-progress auto-open suppression after meeting start", () => {
 describe("REGRESSION: same-id reschedule from in-progress to future start", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(mockUpdateTrayTitle).mockClear();
     vi.mocked(mockShowAlert).mockClear();
@@ -1258,7 +1397,7 @@ describe("REGRESSION: same-id reschedule from in-progress to future start", () =
   });
   afterEach(() => {
     vi.useRealTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     stateModule.state.powerCallbacks = null;
     vi.mocked(mockUpdateTrayTitle).mockClear();
@@ -1425,6 +1564,7 @@ describe("REGRESSION: same-id reschedule from in-progress to future start", () =
     expect(mockShowAlert).toHaveBeenCalledWith(
       expect.objectContaining({ id: "rs4" }),
       expect.anything(),
+      expect.any(String),
     );
   });
 });
