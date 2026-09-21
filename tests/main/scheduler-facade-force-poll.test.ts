@@ -1,424 +1,171 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
-
-// Mock electron
-vi.mock("electron", () => ({
-  app: {
-    getPath: vi.fn().mockReturnValue("/tmp/test"),
-    getAppPath: vi.fn().mockReturnValue("/tmp/test"),
-  },
-}));
-
-// Mock calendar module — single source of truth for poll() side effect counting
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  reportCalendarPollError: vi.fn(),
-  refreshCalendarPublication: vi.fn().mockResolvedValue({
-    publicationGeneration: 1,
-    result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] },
-  }),
-  getLastPublication: vi.fn().mockReturnValue(null),
-}));
-
-// Mock power module
-vi.mock("../../src/main/system/power.js", () => ({
-  getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
-  preventSleep: vi.fn(),
-  allowSleep: vi.fn(),
-}));
-
-// Mock settings
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi
-    .fn()
-    .mockReturnValue({
-    schemaVersion: 3,
-    openBeforeMinutes: 1,
-    launchAtLogin: false,
-    showTomorrowMeetings: true,
-    showCompletedTodayMeetings: false,
-    windowAlert: true,
-    autoOpenEnabled: true,
-    alertLeadSeconds: 60,
-    nativeNotifications: true,
-    lateJoinGraceMinutes: 0,
-    quietHoursEnabled: false,
-    quietHoursStart: "22:00",
-    quietHoursEnd: "07:00",
-  }),
-}));
-
-const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
-const stateModule = await import("../../src/main/scheduler/state/index.js");
-const {
-  initPowerCallbacks,
-  startScheduler,
-  forcePoll,
-  stopScheduler,
-  _resetForceTestState,
-} = await import("../../src/main/scheduler/facade.js");
-const { _resetForTest } = await import("../../src/main/scheduler/poll.js");
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CalendarPublication } from "../../src/domain/entities/calendar-publication.js";
+import { createSchedulerFacade, type SchedulerFacade } from "../../src/main/scheduler/facade.js";
+import {
+  calendarPublication,
+  schedulerTestContext,
+  type SchedulerTestContext,
+} from "../helpers/scheduler-runtime.js";
 
 const FORCE_POLL_COALESCE_MS = 10_000;
+const POLL_INTERVAL_MS = 2 * 60_000;
 
-describe("forcePoll() deferred coalesce", () => {
+interface DeferredPublication {
+  readonly promise: Promise<CalendarPublication>;
+  readonly resolve: (publication: CalendarPublication) => void;
+}
+
+function deferredPublication(): DeferredPublication {
+  let resolve = (_publication: CalendarPublication): void => {};
+  const promise = new Promise<CalendarPublication>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+describe("SchedulerFacade force-poll coordination", () => {
+  let context: SchedulerTestContext;
+  let facade: SchedulerFacade;
+
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
-    _resetForceTestState();
-    vi.mocked(refreshCalendarPublication).mockClear();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    initPowerCallbacks({
-      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+    context = schedulerTestContext();
+    facade = createSchedulerFacade(context.dependencies);
+    facade.initPowerCallbacks({
+      getPollInterval: () => POLL_INTERVAL_MS,
       preventSleep: vi.fn(),
       allowSleep: vi.fn(),
     });
   });
 
   afterEach(() => {
-    _resetForTest();
-    _resetForceTestState();
+    facade.stop();
     vi.useRealTimers();
-    stateModule.state.powerCallbacks = null;
   });
 
-  it("schedules one deferred poll when called within coalesce window", async () => {
-    // First forcePoll runs immediately
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+  it("schedules one deferred poll inside the coalesce window", async () => {
+    await facade.forcePoll();
+    await facade.forcePoll();
+    await facade.forcePoll({ reason: "watch" });
+    await facade.forcePoll({ reason: "auto" });
+    expect(context.refresh).toHaveBeenCalledOnce();
 
-    // Stop the re-armed scheduled poll so it doesn't pollute the count
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-
-    // Subsequent auto/watch calls within coalesce window should be deferred (not dropped)
-    await forcePoll(); // schedules deferred
-    await forcePoll({ reason: "watch" }); // already scheduled — no-op
-    await forcePoll({ reason: "auto" }); // already scheduled — no-op
-
-    // No additional poll yet
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Advance to the deferred poll firing time
     await vi.advanceTimersByTimeAsync(FORCE_POLL_COALESCE_MS);
 
-    // Exactly one deferred poll should have fired
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("user reason bypasses coalesce and re-fetches immediately", async () => {
-    await forcePoll({ reason: "auto" });
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-
-    // Within coalesce window — auto would defer, user must fetch now
-    await forcePoll({ reason: "user" });
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+  it("lets user polls bypass coalescing", async () => {
+    await facade.forcePoll({ reason: "auto" });
+    await facade.forcePoll({ reason: "user" });
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("user forcePoll clears a pending deferred auto timer", async () => {
-    await forcePoll({ reason: "auto" });
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-
-    await forcePoll({ reason: "auto" }); // schedules deferred
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    await forcePoll({ reason: "user" }); // immediate; cancels deferred
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
+  it("cancels a deferred auto poll when a user poll runs", async () => {
+    await facade.forcePoll({ reason: "auto" });
+    await facade.forcePoll({ reason: "auto" });
+    await facade.forcePoll({ reason: "user" });
 
     await vi.advanceTimersByTimeAsync(FORCE_POLL_COALESCE_MS * 2);
-    // Deferred must not fire a third poll
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
 
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("stopScheduler clears any pending deferred forcePoll timer", async () => {
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+  it("cancels a deferred poll when stopped", async () => {
+    await facade.forcePoll();
+    await facade.forcePoll();
+    facade.stop();
 
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-
-    // Schedule a deferred poll
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Stop the scheduler — should clear the deferred timer
-    stopScheduler();
-
-    // Advance well past the coalesce window
     await vi.advanceTimersByTimeAsync(FORCE_POLL_COALESCE_MS * 2);
 
-    // Deferred poll must NOT have fired after stopScheduler
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+    expect(context.refresh).toHaveBeenCalledOnce();
   });
 
-  it("deferred forcePoll firing + concurrent request yields exactly one follow-up", async () => {
-    // Poll #1: fast (resolves via default mock)
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Cancel re-armed scheduled poll so it doesn't pollute the count
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-
-    // Poll #2 (deferred): make it slow so we can race a request during its run
-    let resolveSecond: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const secondPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveSecond = r;
-    });
-    vi.mocked(refreshCalendarPublication).mockReturnValueOnce(secondPromise);
-
-    // Within coalesce window — schedules deferred timer
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Fire the deferred timer; deferred fires recursive forcePoll which starts poll #2
+  it("runs one follow-up for requests arriving during a deferred poll", async () => {
+    await facade.forcePoll();
+    const deferred = deferredPublication();
+    context.refresh.mockReturnValueOnce(deferred.promise);
+    await facade.forcePoll();
     await vi.advanceTimersByTimeAsync(FORCE_POLL_COALESCE_MS);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
+    expect(context.refresh).toHaveBeenCalledTimes(2);
 
-    // Request arrives DURING the deferred poll's run — must not be dropped,
-    // must queue exactly one follow-up via the in-flight guard.
-    const racer1 = forcePoll();
-    const racer2 = forcePoll();
-    const racer3 = forcePoll();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
+    const requests = [facade.forcePoll(), facade.forcePoll(), facade.forcePoll()];
+    deferred.resolve(calendarPublication(2));
+    await Promise.all(requests);
 
-    // Resolve poll #2 — exactly one follow-up poll #3 fires for all racers
-    resolveSecond({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await Promise.all([racer1, racer2, racer3]);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(3);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-  });
-});
-
-describe("facade in-flight poll guard", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    _resetForTest();
-    _resetForceTestState();
-    vi.mocked(refreshCalendarPublication).mockClear();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    initPowerCallbacks({
-      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
-      preventSleep: vi.fn(),
-      allowSleep: vi.fn(),
-    });
+    expect(context.refresh).toHaveBeenCalledTimes(3);
   });
 
-  afterEach(() => {
-    _resetForTest();
-    _resetForceTestState();
-    vi.useRealTimers();
-    stateModule.state.powerCallbacks = null;
+  it("does not overlap an in-flight poll", async () => {
+    const deferred = deferredPublication();
+    context.refresh.mockReturnValueOnce(deferred.promise);
+    const first = facade.forcePoll();
+    await Promise.resolve();
+
+    const second = facade.forcePoll();
+    expect(context.refresh).toHaveBeenCalledOnce();
+    deferred.resolve(calendarPublication());
+    await Promise.all([first, second]);
+
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("does not start a second concurrent poll() while one is in flight", async () => {
-    // Make poll() slow: returns a manually-resolvable promise
-    let resolveFirst: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const firstPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveFirst = r;
-    });
-    vi.mocked(refreshCalendarPublication).mockReturnValueOnce(firstPromise);
-
-    // Kick off first forcePoll — it begins poll() and awaits refreshCalendarPublication
-    const p1 = forcePoll();
-    // Flush microtasks so poll() actually starts and calls refreshCalendarPublication
+  it("coalesces many overlapping requests into one follow-up", async () => {
+    const deferred = deferredPublication();
+    context.refresh.mockReturnValueOnce(deferred.promise);
+    const first = facade.forcePoll();
     await Promise.resolve();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
 
-    // Second forcePoll while first is still in-flight
-    const p2 = forcePoll();
-    await Promise.resolve();
-    await Promise.resolve();
-    // Guard must prevent a second concurrent poll() invocation
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+    const overlapping = Array.from({ length: 4 }, () => facade.forcePoll());
+    deferred.resolve(calendarPublication());
+    await Promise.all([first, ...overlapping]);
 
-    // Resolve the first poll. Queued follow-up must run exactly once.
-    resolveFirst({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await p1;
-    await p2;
-    // Drain any queued follow-up microtasks
-    await vi.advanceTimersByTimeAsync(0);
-
-    // Exactly one follow-up poll fired (total = 2)
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    // Stop re-armed scheduled poll so it doesn't pollute later assertions
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("coalesces multiple overlapping requests into exactly one follow-up", async () => {
-    let resolveFirst: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const firstPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveFirst = r;
-    });
-    vi.mocked(refreshCalendarPublication).mockReturnValueOnce(firstPromise);
-
-    const p1 = forcePoll();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Four overlapping requests while first is in-flight
-    const p2 = forcePoll();
-    const p3 = forcePoll();
-    const p4 = forcePoll();
-    const p5 = forcePoll();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    resolveFirst({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await Promise.all([p1, p2, p3, p4, p5]);
-    await vi.advanceTimersByTimeAsync(0);
-
-    // Only ONE follow-up poll regardless of how many requests arrived
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+  it("clears the in-flight guard after a rejected refresh", async () => {
+    context.refresh.mockRejectedValueOnce(new Error("boom"));
+    await facade.forcePoll();
+    await facade.forcePoll({ reason: "user" });
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("clears in-flight guard when poll() throws so scheduler is not stuck", async () => {
-    // First poll rejects
-    vi.mocked(refreshCalendarPublication).mockRejectedValueOnce(new Error("boom"));
+  it("waits for the startup poll to settle before arming cadence", async () => {
+    const deferred = deferredPublication();
+    context.refresh.mockReturnValueOnce(deferred.promise);
+    facade.start();
+    facade.start();
+    await Promise.resolve();
 
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(context.refresh).toHaveBeenCalledOnce();
+    deferred.resolve(calendarPublication());
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
 
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
-    _resetForceTestState();
-
-    // A subsequent forcePoll must still be able to run — guard must have cleared
-    await forcePoll();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+    expect(context.refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("prevents recursive scheduler timer poll from overlapping an in-flight forcePoll", async () => {
-    // Start the scheduler — fires an initial guarded poll immediately
-    let resolveFirst: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const firstPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveFirst = r;
-    });
-    vi.mocked(refreshCalendarPublication).mockReturnValueOnce(firstPromise);
+  it("queues a request arriving while the first follow-up is running", async () => {
+    const firstDeferred = deferredPublication();
+    const secondDeferred = deferredPublication();
+    context.refresh
+      .mockReturnValueOnce(firstDeferred.promise)
+      .mockReturnValueOnce(secondDeferred.promise);
+    const first = facade.forcePoll();
+    await Promise.resolve();
+    const second = facade.forcePoll();
 
-    startScheduler();
+    firstDeferred.resolve(calendarPublication(1));
     await Promise.resolve();
     await Promise.resolve();
-    // Initial poll from startScheduler is in flight
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
+    expect(context.refresh).toHaveBeenCalledTimes(2);
 
-    // forcePoll while initial scheduler poll is still running
-    const fp = forcePoll();
-    await Promise.resolve();
-    await Promise.resolve();
-    // Guard must prevent a concurrent poll() from forcePoll
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Resolve the in-flight poll — queued follow-up runs exactly once
-    resolveFirst({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await fp;
-    await vi.advanceTimersByTimeAsync(0);
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    stopScheduler();
-  });
-
-  it("queues a new request that arrives while the follow-up poll itself is running", async () => {
-    // First poll: slow
-    let resolveFirst: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const firstPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveFirst = r;
-    });
-    // Second poll (the queued follow-up): also slow so we can race a request during it
-    let resolveSecond: (v: { publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }) => void = () => {};
-    const secondPromise = new Promise<{ publicationGeneration: number; result: { kind: "ok"; source: "live"; completeness: "complete"; observedAt: number; events: never[] } }>((r) => {
-      resolveSecond = r;
-    });
-    vi.mocked(refreshCalendarPublication)
-      .mockReturnValueOnce(firstPromise)
-      .mockReturnValueOnce(secondPromise);
-
-    // Start first poll
-    const p1 = forcePoll();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Request 2 arrives while p1 is in-flight — becomes the queued follow-up
-    const p2 = forcePoll();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(1);
-
-    // Resolve first poll — the queued follow-up (poll #2) now starts and is in-flight
-    resolveFirst({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    // Advance wall time past the forcePoll coalesce window so request #3 is not deferred
     vi.setSystemTime(Date.now() + FORCE_POLL_COALESCE_MS + 1);
+    const third = facade.forcePoll();
+    secondDeferred.resolve(calendarPublication(2));
+    await Promise.all([first, second, third]);
 
-    // Request 3 arrives DURING the queued follow-up — must not be dropped
-    const p3 = forcePoll();
-    await Promise.resolve();
-    // Still in follow-up #2; no additional poll yet
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
-
-    // Resolve follow-up #2 — a third poll must run for request 3
-    resolveSecond({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
-    await Promise.all([p1, p2, p3]);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(refreshCalendarPublication).toHaveBeenCalledTimes(3);
-
-    if (stateModule.state.pollTimeout !== null) {
-      clearTimeout(stateModule.state.pollTimeout);
-      stateModule.state.pollTimeout = null;
-    }
+    expect(context.refresh).toHaveBeenCalledTimes(3);
   });
 });
