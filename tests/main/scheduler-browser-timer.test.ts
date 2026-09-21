@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { EventId } from "../../src/domain/entities/brand.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
 import { asTestEventId, createMockEvent } from "../helpers/test-utils.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 // Override the global electron mock with a constructable Notification
 vi.mock("electron", () => {
@@ -10,25 +12,17 @@ vi.mock("electron", () => {
   });
   return {
     Notification: MockNotification,
-    shell: { openExternal: vi.fn().mockResolvedValue(undefined) },
   };
 });
 
 vi.mock("../../src/domain/services/build-meet-url.js", () => ({
   buildMeetUrl: vi
     .fn()
-    .mockReturnValue(
-      "https://meet.google.com/abc-def-ghi?authuser=user%40test.com",
-    ),
+    .mockReturnValue("https://meet.google.com/abc-def-ghi?authuser=user%40test.com"),
 }));
 
-vi.mock("../../src/main/utils/meet-url.js", () => ({
-  openMeetingUrl: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
-}));
-
-const { Notification, shell } = await import("electron");
+const { Notification } = await import("electron");
 const { buildMeetUrl } = await import("../../src/domain/services/build-meet-url.js");
-const { openMeetingUrl } = await import("../../src/main/utils/meet-url.js");
 const { scheduleBrowserTimer, cancelBrowserTimer } =
   await import("../../src/main/scheduler/browser-timer.js");
 
@@ -44,6 +38,8 @@ function makeEvent(overrides: Partial<MeetingEvent> = {}): MeetingEvent {
 describe("scheduleBrowserTimer", () => {
   let timers: Map<EventId, ReturnType<typeof setTimeout>>;
   let firedEvents: Map<EventId, number>;
+  let runtime: SchedulerRuntime;
+  let open: ReturnType<typeof schedulerTestContext>["open"];
 
   const effectiveDelay = 60_000;
   const startMs = Date.now() + 5 * 60 * 1000;
@@ -52,11 +48,12 @@ describe("scheduleBrowserTimer", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    timers = new Map();
-    firedEvents = new Map();
+    const context = schedulerTestContext();
+    runtime = context.runtime;
+    open = context.open;
+    timers = runtime.state.timers;
+    firedEvents = runtime.state.firedEvents;
     vi.mocked(buildMeetUrl).mockClear();
-    vi.mocked(shell.openExternal).mockClear();
-    vi.mocked(openMeetingUrl).mockClear();
     vi.mocked(Notification).mockClear();
   });
 
@@ -67,15 +64,7 @@ describe("scheduleBrowserTimer", () => {
   });
 
   function schedule(event: MeetingEvent): void {
-    scheduleBrowserTimer(
-      event,
-      effectiveDelay,
-      openAtMs,
-      startMs,
-      endMs,
-      timers,
-      firedEvents,
-    );
+    scheduleBrowserTimer(runtime, event, effectiveDelay, openAtMs, startMs, endMs, 0);
   }
 
   it("creates a timer and stores it in timers map", () => {
@@ -112,12 +101,12 @@ describe("scheduleBrowserTimer", () => {
     });
   });
 
-  it("with meetUrl: opens browser via openMeetingUrl", () => {
+  it("with meetUrl: opens browser via the owning opener", () => {
     const event = makeEvent();
     schedule(event);
 
     vi.advanceTimersByTime(60_000);
-    expect(openMeetingUrl).toHaveBeenCalledWith(
+    expect(open).toHaveBeenCalledWith(
       "https://meet.google.com/abc-def-ghi?authuser=user%40test.com",
     );
   });
@@ -127,7 +116,7 @@ describe("scheduleBrowserTimer", () => {
     schedule(event);
 
     vi.advanceTimersByTime(60_000);
-    expect(openMeetingUrl).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
     expect(buildMeetUrl).not.toHaveBeenCalled();
   });
 
@@ -151,11 +140,15 @@ describe("scheduleBrowserTimer", () => {
 
 describe("cancelBrowserTimer", () => {
   let timers: Map<EventId, ReturnType<typeof setTimeout>>;
+  let runtime: SchedulerRuntime;
+  let open: ReturnType<typeof schedulerTestContext>["open"];
 
   beforeEach(() => {
     vi.useFakeTimers();
-    timers = new Map();
-    vi.mocked(openMeetingUrl).mockClear();
+    const context = schedulerTestContext();
+    runtime = context.runtime;
+    open = context.open;
+    timers = runtime.state.timers;
   });
 
   afterEach(() => {
@@ -166,18 +159,9 @@ describe("cancelBrowserTimer", () => {
 
   it("clears timer and removes from map", () => {
     const event = makeEvent();
-    const firedEvents = new Map<EventId, number>();
     const startMs = Date.now();
     const openAtMs = startMs - 60_000;
-    scheduleBrowserTimer(
-      event,
-      60_000,
-      openAtMs,
-      startMs,
-      startMs + 30 * 60_000,
-      timers,
-      firedEvents,
-    );
+    scheduleBrowserTimer(runtime, event, 60_000, openAtMs, startMs, startMs + 30 * 60_000, 0);
     expect(timers.has(event.id)).toBe(true);
 
     cancelBrowserTimer(event.id, timers);
@@ -185,7 +169,7 @@ describe("cancelBrowserTimer", () => {
 
     // Timer should not fire after cancellation
     vi.advanceTimersByTime(60_000);
-    expect(openMeetingUrl).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("is safe to call with non-existent eventId (no-op)", () => {
@@ -199,26 +183,17 @@ describe("scheduleBrowserTimer TTL suppression", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.mocked(openMeetingUrl).mockClear();
   });
   afterEach(() => vi.useRealTimers());
 
   it("records expiry as endMs + 15min when timer fires", () => {
-    const timers = new Map<EventId, ReturnType<typeof setTimeout>>();
-    const firedEvents = new Map<EventId, number>();
+    const runtime = schedulerTestContext().runtime;
+    const firedEvents = runtime.state.firedEvents;
     const event = makeEvent();
     const startMs = Date.now() + 5 * 60_000;
     const openAtMs = startMs - 60_000;
     const endMs = Date.now() + 35 * 60_000;
-    scheduleBrowserTimer(
-      event,
-      60_000,
-      openAtMs,
-      startMs,
-      endMs,
-      timers,
-      firedEvents,
-    );
+    scheduleBrowserTimer(runtime, event, 60_000, openAtMs, startMs, endMs, 0);
     vi.advanceTimersByTime(60_000);
     expect(firedEvents.get(event.id)).toBe(endMs + FIFTEEN_MIN_MS);
   });

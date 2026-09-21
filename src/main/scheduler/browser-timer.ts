@@ -3,8 +3,7 @@ import type { MeetingEvent } from "../../domain/entities/meeting-event.js";
 import type { EventId } from "../../domain/entities/brand.js";
 import { FIRED_EVENT_TTL_MS } from "./state/state-timers.js";
 import { buildMeetUrl } from "../../domain/services/build-meet-url.js";
-import { openMeetingUrl } from "../utils/meet-url.js";
-import { getLateJoinGraceMs } from "./late-join.js";
+import type { SchedulerRuntime } from "./runtime.js";
 
 /** Human-readable notification body based on minutes until meeting start. */
 export function notificationBodyForOpen(startMs: number, nowMs: number = Date.now()): string {
@@ -26,21 +25,21 @@ export interface BrowserTimerOptions {
  * before arming browser/alert/title so auto-open can be disabled independently.
  */
 export function scheduleBrowserTimer(
+  runtime: SchedulerRuntime,
   event: MeetingEvent,
   effectiveDelay: number,
   _openAtMs: number,
   startMs: number,
   endMs: number,
-  timers: Map<EventId, ReturnType<typeof setTimeout>>,
-  firedEvents: Map<EventId, number>,
+  graceMs: number,
   options: BrowserTimerOptions = {},
 ): void {
+  const { timers, firedEvents } = runtime.state;
   const showNativeNotification = options.nativeNotifications !== false;
   const handle = setTimeout(() => {
     if (timers.get(event.id) !== handle) return;
     timers.delete(event.id);
     const now = Date.now();
-    const graceMs = getLateJoinGraceMs();
     // Past grace window after start: mark fired, do not open
     if (now >= startMs + graceMs) {
       firedEvents.set(event.id, endMs + FIRED_EVENT_TTL_MS);
@@ -63,14 +62,11 @@ export function scheduleBrowserTimer(
       return;
     }
     const url = buildMeetUrl(event);
-    void openMeetingUrl(url).then((result) => {
-      if (result?.ok) {
+    void runtime.dependencies.opener.open(url).then((result) => {
+      if (result.ok) {
         console.log(`[scheduler] Opened browser for "${event.title}" → ${url}`);
       } else {
-        console.error(
-          `[scheduler] Failed to open browser for "${event.title}":`,
-          result && !result.ok ? result.error : "unknown",
-        );
+        console.error(`[scheduler] Failed to open browser for "${event.title}":`, result.error);
       }
     });
   }, effectiveDelay);
