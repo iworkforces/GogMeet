@@ -1,64 +1,42 @@
 import type { AppSettings } from "../../domain/entities/settings.js";
 import type { Result } from "../../domain/entities/result.js";
-import type { SettingsStorePort } from "../application/ports/settings-store-port.js";
-import { createLoadSettings, type LoadSettings } from "../application/use-cases/load-settings.js";
-import {
-  createUpdateSettings,
-  type UpdateSettings,
-} from "../application/use-cases/update-settings.js";
-import { createGetSettings, type GetSettings } from "../application/use-cases/get-settings.js";
+import { createLoadSettings } from "../application/use-cases/load-settings.js";
+import { createUpdateSettings } from "../application/use-cases/update-settings.js";
+import { createGetSettings } from "../application/use-cases/get-settings.js";
 import {
   createJsonSettingsStore,
   type JsonSettingsStore,
 } from "../infrastructure/settings/json-settings-store.js";
 
-let defaultStore: JsonSettingsStore = createJsonSettingsStore();
-
-let _load: LoadSettings = createLoadSettings(defaultStore);
-let _update: UpdateSettings = createUpdateSettings(defaultStore);
-let _get: GetSettings = createGetSettings(defaultStore);
-
-/** Test / composition override. */
-export function bindSettingsUseCases(bindings: {
-  load?: LoadSettings;
-  update?: UpdateSettings;
-  get?: GetSettings;
-  store?: SettingsStorePort;
-}): void {
-  if (bindings.store) {
-    _load = createLoadSettings(bindings.store);
-    _update = createUpdateSettings(bindings.store);
-    _get = createGetSettings(bindings.store);
-    if ("save" in bindings.store) {
-      defaultStore = bindings.store as JsonSettingsStore;
-    }
-    return;
-  }
-  if (bindings.load) _load = bindings.load;
-  if (bindings.update) _update = bindings.update;
-  if (bindings.get) _get = bindings.get;
+export interface SettingsFacade {
+  readonly load: () => Promise<Result<AppSettings, string>>;
+  readonly save: (settings: AppSettings) => Promise<void>;
+  readonly get: () => AppSettings;
+  readonly update: (partial: Partial<AppSettings>) => Promise<AppSettings>;
 }
 
-export function rebindSettingsDefaults(): void {
-  defaultStore = createJsonSettingsStore();
-  _load = createLoadSettings(defaultStore);
-  _update = createUpdateSettings(defaultStore);
-  _get = createGetSettings(defaultStore);
-}
+export function createSettingsFacade(
+  store: JsonSettingsStore = createJsonSettingsStore(),
+): SettingsFacade {
+  const load = createLoadSettings(store);
+  const update = createUpdateSettings(store);
+  const get = createGetSettings(store);
 
-export async function loadSettings(): Promise<Result<AppSettings, string>> {
-  return _load.execute();
-}
+  return {
+    load(): Promise<Result<AppSettings, string>> {
+      return load.execute();
+    },
 
-/** Persist settings blob (tests and migration). Prefer updateSettings for partials. */
-export async function saveSettings(settings: AppSettings): Promise<void> {
-  await defaultStore.save(settings);
-}
+    save(settings: AppSettings): Promise<void> {
+      return store.save(settings);
+    },
 
-export function getSettings(): AppSettings {
-  return _get.execute();
-}
+    get(): AppSettings {
+      return get.execute();
+    },
 
-export async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
-  return _update.execute(partial);
+    update(partial: Partial<AppSettings>): Promise<AppSettings> {
+      return update.execute(partial);
+    },
+  };
 }
