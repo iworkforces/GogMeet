@@ -1,6 +1,6 @@
-import { state, setActiveTitleEventId, markTitleDirty } from "./state/index.js";
 import type { EventId } from "../../domain/entities/brand.js";
 import { resolveActiveTitleEvent, startInMeetingCountdown } from "./countdown.js";
+import type { SchedulerRuntime } from "./runtime.js";
 
 /** How long before meeting start to show the tray title (ms) */
 const TITLE_BEFORE_MS: number = 30 * 60 * 1000; // 30 minutes
@@ -17,7 +17,8 @@ export interface TitleCountdownParams {
 }
 
 /** Compute whole minutes remaining until startMs and update tray */
-function tickCountdown(params: TitleCountdownParams): void {
+function tickCountdown(runtime: SchedulerRuntime, params: TitleCountdownParams): void {
+  const { state } = runtime;
   // Only update tray if this event currently owns the title
   if (params.eventId !== state.activeTitleEventId) return;
   const data = state.scheduledEventData.get(params.eventId);
@@ -30,10 +31,12 @@ function tickCountdown(params: TitleCountdownParams): void {
 
 /** Start per-minute countdown interval and schedule clear at startMs */
 function startCountdown(
+  runtime: SchedulerRuntime,
   params: TitleCountdownParams,
   countdownIntervals: Map<EventId, ReturnType<typeof setInterval>>,
   clearTimers: Map<EventId, ReturnType<typeof setTimeout>>,
 ): void {
+  const { state } = runtime;
   // Guard: bail if event was deleted between titleTimer fire and now
   if (!state.scheduledEventData.has(params.eventId)) return;
 
@@ -41,16 +44,16 @@ function startCountdown(
   state.cancelledEvents.delete(params.eventId);
 
   state.powerCallbacks?.preventSleep?.();
-  tickCountdown(params); // immediate tick so title appears right away — sets ownership via resolveActiveTitleEvent below
+  tickCountdown(runtime, params);
   const intervalHandle = setInterval(() => {
-    tickCountdown(params);
+    tickCountdown(runtime, params);
   }, 60_000);
   countdownIntervals.set(params.eventId, intervalHandle);
-  markTitleDirty();
+  state.titleDirty = true;
   console.log(`[scheduler] Countdown started for "${params.eventTitle}"`);
 
   // Resolve ownership so tray title reflects earliest-starting meeting
-  resolveActiveTitleEvent();
+  resolveActiveTitleEvent(runtime);
 
   const clearHandle = setTimeout(
     () => {
@@ -66,19 +69,19 @@ function startCountdown(
         clearInterval(countdown);
       }
       countdownIntervals.delete(params.eventId);
-      markTitleDirty();
+      state.titleDirty = true;
       state.powerCallbacks?.allowSleep?.();
       clearTimers.delete(params.eventId);
       if (state.activeTitleEventId === params.eventId) {
-        setActiveTitleEventId(null);
+        state.activeTitleEventId = null;
       }
 
       // Start in-meeting countdown
       const data = state.scheduledEventData.get(params.eventId);
       if (data) {
-        startInMeetingCountdown(params.eventId, data);
+        startInMeetingCountdown(runtime, params.eventId, data);
       } else {
-        resolveActiveTitleEvent();
+        resolveActiveTitleEvent(runtime);
       }
 
       console.log(`[scheduler] Meeting started: "${params.eventTitle}"`);
@@ -93,13 +96,14 @@ function startCountdown(
  * Manages: title timer, countdown interval, clear timer.
  */
 export function scheduleTitleCountdown(
+  runtime: SchedulerRuntime,
   params: TitleCountdownParams,
   titleTimers: Map<EventId, ReturnType<typeof setTimeout>>,
   countdownIntervals: Map<EventId, ReturnType<typeof setInterval>>,
   clearTimers: Map<EventId, ReturnType<typeof setTimeout>>,
 ): void {
   // Cancel any existing title/countdown/clear timers before (re-)scheduling
-  cancelTitleCountdown(params.eventId, titleTimers, countdownIntervals, clearTimers);
+  cancelTitleCountdown(runtime, params.eventId, titleTimers, countdownIntervals, clearTimers);
 
   const titleAtMs = params.startMs - TITLE_BEFORE_MS;
   const titleDelayMs = titleAtMs - params.now;
@@ -108,7 +112,7 @@ export function scheduleTitleCountdown(
     // Title starts in the future — schedule the countdown to begin then
     const titleHandle = setTimeout(() => {
       titleTimers.delete(params.eventId);
-      startCountdown(params, countdownIntervals, clearTimers);
+      startCountdown(runtime, params, countdownIntervals, clearTimers);
     }, titleDelayMs);
     titleTimers.set(params.eventId, titleHandle);
     console.log(
@@ -116,7 +120,7 @@ export function scheduleTitleCountdown(
     );
   } else if (params.startMs > params.now) {
     // Already inside the 30-min window — start countdown immediately
-    startCountdown(params, countdownIntervals, clearTimers);
+    startCountdown(runtime, params, countdownIntervals, clearTimers);
   }
 }
 
@@ -124,11 +128,13 @@ export function scheduleTitleCountdown(
  * Cancel title countdown timers for a specific event.
  */
 export function cancelTitleCountdown(
+  runtime: SchedulerRuntime,
   eventId: EventId,
   titleTimers: Map<EventId, ReturnType<typeof setTimeout>>,
   countdownIntervals: Map<EventId, ReturnType<typeof setInterval>>,
   clearTimers: Map<EventId, ReturnType<typeof setTimeout>>,
 ): void {
+  const { state } = runtime;
   const existingTitle = titleTimers.get(eventId);
   if (existingTitle) {
     clearTimeout(existingTitle);
@@ -139,7 +145,7 @@ export function cancelTitleCountdown(
     state.cancelledEvents.add(eventId);
     clearInterval(existingCountdown);
     state.powerCallbacks?.allowSleep?.();
-    markTitleDirty();
+    state.titleDirty = true;
     countdownIntervals.delete(eventId);
   }
   const existingClear = clearTimers.get(eventId);
@@ -154,7 +160,11 @@ export function cancelTitleCountdown(
  * Called from scheduleEvents() via cancelStaleEntries to prevent unbounded
  * growth of the cancelledEvents Set across the app lifetime.
  */
-export function pruneCancelledEvents(activeIds: ReadonlySet<EventId>): void {
+export function pruneCancelledEvents(
+  runtime: SchedulerRuntime,
+  activeIds: ReadonlySet<EventId>,
+): void {
+  const { state } = runtime;
   for (const id of state.cancelledEvents) {
     if (!activeIds.has(id)) {
       state.cancelledEvents.delete(id);
