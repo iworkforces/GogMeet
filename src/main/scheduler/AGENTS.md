@@ -6,7 +6,7 @@ Core scheduling engine for polling calendar, scheduling per-event timers, updati
 
 | File                             | Role                                                                                                                                                                                                                                                                                                |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `facade.ts`                      | Sole public entry. Owns start/stop/restart, `forcePoll`, dependency injection, `cancelPendingBrowserOpen`, force-poll coalescing                                                                                                                                                                    |
+| `facade.ts`                      | `createSchedulerFacade()` returns the sole public instance surface: start/stop/restart, `forcePoll`, dependency injection, `cancelPendingBrowserOpen`, and force-poll coalescing                                                                                                                    |
 | `index.ts`                       | `scheduleEvents(events)` — snapshot → pure `planSchedule` → `interpretSchedulePlan`; also re-exports plan/types/late-join helpers for **internal** scheduler use (not a public package barrel)                                                                                                      |
 | `core/plan-schedule.ts`          | Pure scheduling decisions (no Electron / timers)                                                                                                                                                                                                                                                    |
 | `core/schedule-types.ts`         | `SchedulePlan` ADT / action types (includes **`set-snapshot`**)                                                                                                                                                                                                                                     |
@@ -30,19 +30,18 @@ Core scheduling engine for polling calendar, scheduling per-event timers, updati
 
 ## Public API (`facade.ts` only)
 
-| Function                        | Contract                                                                                                                                                                                                           |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `startScheduler()`              | Bumps `pollEpoch`, initial `poll()`, arms recursive polling timeout                                                                                                                                                |
-| `stopScheduler()`               | Cancels pending force poll, **`cancelCalendarRefresh()`**, resets resources preserving window (`preserveFiredState` optional), clears tray title                                                                   |
-| `restartScheduler()`            | `stop({ preserveFiredState: true })` then start; **timing settings** (not power wake — power uses forcePoll)                                                                                                       |
+| Method                          | Contract                                                                                                                                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`                       | Bumps `pollEpoch`, initial `poll()`, arms recursive polling timeout                                                                                                                                                 |
+| `stop()`                        | Cancels pending force poll, cancels the injected calendar refresh, resets resources preserving window (`preserveFiredState` optional), clears tray title                                                            |
+| `restart()`                     | `stop({ preserveFiredState: true })` then start; timing settings use this method, while power uses `forcePoll`                                                                                                      |
 | `forcePoll(options?)`           | Coordinated poll. `ForcePollReason`: `user` \| `auto` \| `watch` \| `power`. **`user` bypasses** 10s coalesce (tray Refresh); auto/watch/power coalesce. First settled poll emits startup `first-poll` when tracing |
-| `republishUiForDisplayTick()`   | Force re-push last publication for wall-clock list refresh (no fetch). **Facade free-function only** — not on `AppGraph.scheduler`; lifecycle/display-horizon call this directly                                   |
-| `setSchedulerWindow(w)`         | BrowserWindow for typed push channels                                                                                                                                                                              |
-| `setTrayTitleCallback(fn)`      | Tray title updater; scheduler never imports tray                                                                                                                                                                   |
-| `initPowerCallbacks(callbacks)` | Poll interval + sleep-prevention hooks from `system/power.ts`                                                                                                                                                      |
-| `getLastKnownEvents()`          | Last calendar result for join/hotkey logic                                                                                                                                                                         |
-| `cancelPendingBrowserOpen(id)`  | Cancels browser timer and marks event fired (alert dismiss **and** successful join)                                                                                                                                |
-| `_resetForceTestState()`        | Test-only reset for facade coalescing timers                                                                                                                                                                       |
+| `republishUiForDisplayTick()`   | Force re-push last publication for wall-clock list refresh with no fetch. Exposed as `graph.scheduler.republishUiForDisplayTick()`.                                                                                 |
+| `setWindow(w)`                  | BrowserWindow for typed push channels                                                                                                                                                                               |
+| `setTrayTitleCallback(fn)`      | Tray title updater; scheduler never imports tray                                                                                                                                                                    |
+| `initPowerCallbacks(callbacks)` | Poll interval + sleep-prevention hooks from `system/power.ts`                                                                                                                                                       |
+| `getLastKnownEvents()`          | Last calendar result for join/hotkey logic                                                                                                                                                                          |
+| `cancelPendingBrowserOpen(id)`  | Cancels browser timer and marks event fired (alert dismiss **and** successful join)                                                                                                                                 |
 
 ## Timing / settings
 
@@ -54,7 +53,7 @@ Core scheduling engine for polling calendar, scheduling per-event timers, updati
 - Quiet hours: suppress **alert show + Notification** only; auto-open continues.
 - Late-join: `settings.lateJoinGraceMinutes` (default 0 = off).
 - Title countdown window: 30 minutes before start.
-- Display horizon (wall-clock list refresh) is owned by `system/display-horizon.ts`, armed from poll publish; lifecycle wires ticks to `republishUiForDisplayTick` + tray force rebuild. Display-only — never auto-opens.
+- Display horizon (wall-clock list refresh) is owned by `system/display-horizon.ts`, armed from poll publish; lifecycle wires ticks to `graph.scheduler.republishUiForDisplayTick()` plus tray force rebuild. Display-only, never auto-opens.
 - In-meeting: poll resyncs when calendar `endMs` changes while already in progress.
 - Schedule-ahead cap: 24 hours.
 - Force-poll coalesce: 10 seconds after last completed poll for **auto/watch/power** only. **`reason: "user"`** always re-fetches immediately (clears any pending deferred auto timer).
@@ -79,6 +78,6 @@ Successful live partial results, including Darwin's count-only diagnostic aggreg
 - Inside scheduler, do not import from `facade.js` (cycles).
 - Do not expose raw mutable Maps/Sets outside `state/`.
 - Auto-open suppression uses **`firedEvents` / `cancelPendingBrowserOpen` only** — never title-countdown `cancelledEvents`.
-- Browser open goes through `openMeetingUrl()` / `buildMeetUrl()`.
-- Alert dismissal and successful `joinMeetingById` both mark opened via facade.
+- Browser auto-open uses the opener injected into `createSchedulerFacade()`; URL construction uses `buildMeetUrl()`.
+- Alert dismissal and a successful `graph.join.byId` both cancel pending browser open through the graph-local scheduler callback.
 - Balance `preventSleep` / `allowSleep` on every terminal countdown path.
