@@ -1,7 +1,7 @@
 # GogMeet - AGENTS.md
 
 - **Updated:** 2026-09-21
-- **App version:** 1.20.4
+- **App version:** 2.0.0
 - **Branch:** develop
 
 `package.json` is the version source of truth. Keep this root metadata aligned with it, but do not hardcode the version elsewhere. Shipped vs open backlog: `docs/STATUS.md`.
