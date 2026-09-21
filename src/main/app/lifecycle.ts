@@ -15,8 +15,6 @@ import { registerShortcuts, unregisterShortcuts } from "../system/shortcuts.js";
 import { initAutoUpdater } from "../system/auto-updater.js";
 import { onDisplayHorizonTick, clearDisplayHorizon } from "../system/display-horizon.js";
 import { createAppGraph, type AppGraph } from "../composition/app-graph.js";
-import { stopScheduler, republishUiForDisplayTick } from "../scheduler/facade.js";
-import { stopCalendarWatcher } from "../facades/calendar-watcher.js";
 import { destroyAlertWindow } from "../windows/alert-window.js";
 import { destroySettingsWindow } from "../windows/settings-window.js";
 import { destroyAboutWindow } from "../windows/about-window.js";
@@ -164,7 +162,7 @@ export async function initializeApp(
       unsubscribeDisplayHorizon?.();
       unsubscribeDisplayHorizon = onDisplayHorizonTick(() => {
         // Wall clock crossed a start/end boundary: force list UI to re-filter.
-        republishUiForDisplayTick();
+        graph.scheduler.republishUiForDisplayTick();
         forceTrayMenuRefresh();
       });
     });
@@ -240,10 +238,6 @@ export function shutdownApp(): void {
   if (graph) {
     graph.scheduler.stop();
     graph.watcher.stop();
-  } else {
-    // No graph (tests / early quit) — fall back to free-function stop.
-    stopScheduler();
-    stopCalendarWatcher();
   }
   unregisterShortcuts();
   activeGraph = null;

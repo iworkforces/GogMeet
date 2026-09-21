@@ -1,19 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppGraph } from "../../src/main/composition/app-graph.js";
 import { createMockSettings } from "../helpers/test-utils.js";
 
-// Use vi.hoisted for mock functions used in vi.mock factories
+type PowerReason = "battery" | "ac" | "resume" | "unlock";
+
 const {
+  displayHorizonListeners,
+  powerCallbacks,
+  mockGraph,
+  mockCreateAppGraph,
   mockRegisterIpcHandlers,
   mockSetupTray,
+  mockForceTrayMenuRefresh,
   mockUpdateTrayTitle,
-  mockStartScheduler,
-  mockStopScheduler,
-  mockRestartScheduler,
-  mockForcePoll,
-  mockSetSchedulerWindow,
-  mockSetTrayTitleCallback,
-  mockGetSettings,
-  mockLoadSettings,
   mockSyncAutoLaunch,
   mockCheckNotificationPermission,
   mockRegisterShortcuts,
@@ -23,78 +22,104 @@ const {
   mockGetPollInterval,
   mockPreventSleep,
   mockAllowSleep,
-  mockGetCalendarPermissionStatus,
-  mockRequestCalendarPermission,
-  mockGetCalendarEventsResult,
-  mockInvalidateCalendarPermissionCache,
-  mockInitPowerCallbacks,
-  mockWarmupCalendarProvider,
-  mockShouldAutoRequestCalendarPermission,
-  mockStartCalendarWatcher,
-  mockStopCalendarWatcher,
   mockInitAutoUpdater,
-  mockReviveCalendarWatcher,
-} = vi.hoisted(() => ({
-  mockRegisterIpcHandlers: vi.fn(),
-  mockSetupTray: vi.fn(),
-  mockUpdateTrayTitle: vi.fn(),
-  mockStartScheduler: vi.fn(),
-  mockStopScheduler: vi.fn(),
-  mockRestartScheduler: vi.fn(),
-  mockForcePoll: vi.fn().mockResolvedValue(null),
-  mockSetSchedulerWindow: vi.fn(),
-  mockSetTrayTitleCallback: vi.fn(),
-  mockGetSettings: vi.fn().mockReturnValue({
-    schemaVersion: 1,
-    openBeforeMinutes: 1,
-    launchAtLogin: false,
-    showTomorrowMeetings: true,
-    windowAlert: true,
-  }),
-  mockLoadSettings: vi.fn().mockResolvedValue({ ok: true, value: {} }),
-  mockSyncAutoLaunch: vi.fn(),
-  mockCheckNotificationPermission: vi.fn().mockResolvedValue(undefined),
-  mockRegisterShortcuts: vi.fn(),
-  mockUnregisterShortcuts: vi.fn(),
-  mockInitPowerManagement: vi.fn(),
-  mockCleanupPowerManagement: vi.fn(),
-  mockGetPollInterval: vi.fn().mockReturnValue(120000),
-  mockPreventSleep: vi.fn(),
-  mockAllowSleep: vi.fn(),
-  mockGetCalendarPermissionStatus: vi.fn().mockResolvedValue("granted"),
-  mockRequestCalendarPermission: vi.fn().mockResolvedValue("granted"),
-  mockGetCalendarEventsResult: vi
-    .fn()
-    .mockResolvedValue({
-      kind: "ok",
-      source: "live",
-      completeness: "complete",
-      observedAt: Date.now(),
-      events: [],
+  mockOnDisplayHorizonTick,
+  mockUnsubscribeDisplayHorizon,
+  mockClearDisplayHorizon,
+  mockDestroyAlertWindow,
+  mockDestroySettingsWindow,
+  mockDestroyAboutWindow,
+  mockDestroyUpdateWindow,
+} = vi.hoisted(() => {
+  const displayHorizonListeners: Array<() => void> = [];
+  const powerCallbacks: Array<(reason: PowerReason) => void> = [];
+  const mockUnsubscribeDisplayHorizon = vi.fn();
+  const mockGraph = {
+    calendar: {
+      getEvents: vi.fn(),
+      getEventsResult: vi.fn(),
+      requestPermission: vi.fn(),
+      getPermissionStatus: vi.fn(),
+      disconnect: vi.fn(),
+      getUiState: vi.fn(),
+      warmup: vi.fn(),
+      invalidatePermissionCache: vi.fn(),
+      shouldAutoRequestPermission: vi.fn(),
+      reportPollError: vi.fn(),
+    },
+    settings: {
+      load: vi.fn(),
+      get: vi.fn(),
+      update: vi.fn(),
+      save: vi.fn(),
+    },
+    scheduler: {
+      forcePoll: vi.fn(),
+      getLastKnownEvents: vi.fn(),
+      republishUiForDisplayTick: vi.fn(),
+      cancelPendingBrowserOpen: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      setWindow: vi.fn(),
+      setTrayTitleCallback: vi.fn(),
+      initPowerCallbacks: vi.fn(),
+    },
+    watcher: {
+      start: vi.fn(),
+      stop: vi.fn(),
+      revive: vi.fn(),
+    },
+    join: { byId: vi.fn() },
+    opener: { open: vi.fn() },
+  } satisfies AppGraph;
+
+  return {
+    displayHorizonListeners,
+    powerCallbacks,
+    mockGraph,
+    mockCreateAppGraph: vi.fn(() => mockGraph),
+    mockRegisterIpcHandlers: vi.fn(),
+    mockSetupTray: vi.fn(),
+    mockForceTrayMenuRefresh: vi.fn(),
+    mockUpdateTrayTitle: vi.fn(),
+    mockSyncAutoLaunch: vi.fn(),
+    mockCheckNotificationPermission: vi.fn(),
+    mockRegisterShortcuts: vi.fn(),
+    mockUnregisterShortcuts: vi.fn(),
+    mockInitPowerManagement: vi.fn((callback: (reason: PowerReason) => void) => {
+      powerCallbacks.push(callback);
     }),
-  mockInvalidateCalendarPermissionCache: vi.fn(),
-  mockInitPowerCallbacks: vi.fn(),
-  mockWarmupCalendarProvider: vi.fn().mockResolvedValue(undefined),
-  mockShouldAutoRequestCalendarPermission: vi.fn().mockReturnValue(true),
-  mockStartCalendarWatcher: vi.fn(),
-  mockStopCalendarWatcher: vi.fn(),
-  mockInitAutoUpdater: vi.fn(),
-  mockReviveCalendarWatcher: vi.fn(),
+    mockCleanupPowerManagement: vi.fn(),
+    mockGetPollInterval: vi.fn(() => 120_000),
+    mockPreventSleep: vi.fn(),
+    mockAllowSleep: vi.fn(),
+    mockInitAutoUpdater: vi.fn(),
+    mockOnDisplayHorizonTick: vi.fn((listener: () => void) => {
+      displayHorizonListeners.push(listener);
+      return mockUnsubscribeDisplayHorizon;
+    }),
+    mockUnsubscribeDisplayHorizon,
+    mockClearDisplayHorizon: vi.fn(),
+    mockDestroyAlertWindow: vi.fn(),
+    mockDestroySettingsWindow: vi.fn(),
+    mockDestroyAboutWindow: vi.fn(),
+    mockDestroyUpdateWindow: vi.fn(),
+  };
+});
+
+vi.mock("../../src/main/composition/app-graph.js", () => ({
+  createAppGraph: mockCreateAppGraph,
 }));
 
-// Mock all subsystem modules that lifecycle.ts imports
 vi.mock("../../src/main/app/ipc.js", () => ({
   registerIpcHandlers: mockRegisterIpcHandlers,
 }));
 
 vi.mock("../../src/main/tray.js", () => ({
   setupTray: mockSetupTray,
+  forceTrayMenuRefresh: mockForceTrayMenuRefresh,
   updateTrayTitle: mockUpdateTrayTitle,
-}));
-
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: mockGetSettings,
-  loadSettings: mockLoadSettings,
 }));
 
 vi.mock("../../src/main/system/auto-launch.js", () => ({
@@ -119,210 +144,182 @@ vi.mock("../../src/main/system/power.js", () => ({
   allowSleep: mockAllowSleep,
 }));
 
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  getCalendarPermissionStatus: mockGetCalendarPermissionStatus,
-  requestCalendarPermission: mockRequestCalendarPermission,
-  getCalendarEventsResult: mockGetCalendarEventsResult,
-  invalidateCalendarPermissionCache: mockInvalidateCalendarPermissionCache,
-  warmupCalendarProvider: mockWarmupCalendarProvider,
-  shouldAutoRequestCalendarPermission: mockShouldAutoRequestCalendarPermission,
-}));
-
-vi.mock("../../src/main/facades/calendar-watcher.js", () => ({
-  startCalendarWatcher: mockStartCalendarWatcher,
-  stopCalendarWatcher: mockStopCalendarWatcher,
-  reviveCalendarWatcher: mockReviveCalendarWatcher,
+vi.mock("../../src/main/system/display-horizon.js", () => ({
+  onDisplayHorizonTick: mockOnDisplayHorizonTick,
+  clearDisplayHorizon: mockClearDisplayHorizon,
 }));
 
 vi.mock("../../src/main/system/auto-updater.js", () => ({
   initAutoUpdater: mockInitAutoUpdater,
 }));
 
-const {
-  mockDestroyAlertWindow,
-  mockDestroySettingsWindow,
-  mockDestroyAboutWindow,
-  mockDestroyUpdateWindow,
-} = vi.hoisted(() => ({
-  mockDestroyAlertWindow: vi.fn(),
-  mockDestroySettingsWindow: vi.fn(),
-  mockDestroyAboutWindow: vi.fn(),
-  mockDestroyUpdateWindow: vi.fn(),
-}));
-
 vi.mock("../../src/main/windows/alert-window.js", () => ({
-  destroyAlertWindow: (...args: unknown[]) => mockDestroyAlertWindow(...args),
+  destroyAlertWindow: mockDestroyAlertWindow,
 }));
 
 vi.mock("../../src/main/windows/settings-window.js", () => ({
-  destroySettingsWindow: (...args: unknown[]) => mockDestroySettingsWindow(...args),
-  getSettingsWindow: vi.fn().mockReturnValue(null),
+  destroySettingsWindow: mockDestroySettingsWindow,
 }));
 
 vi.mock("../../src/main/windows/about-window.js", () => ({
-  destroyAboutWindow: (...args: unknown[]) => mockDestroyAboutWindow(...args),
+  destroyAboutWindow: mockDestroyAboutWindow,
 }));
 
 vi.mock("../../src/main/windows/update-window.js", () => ({
-  destroyUpdateWindow: (...args: unknown[]) => mockDestroyUpdateWindow(...args),
-}));
-
-vi.mock("../../src/main/composition/app-graph.js", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("../../src/main/composition/app-graph.js")>();
-  return {
-    ...mod,
-    createAppGraph: (opts?: Parameters<typeof mod.createAppGraph>[0]) =>
-      mod.createAppGraph({ skipBind: true, ...opts }),
-  };
-});
-
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  initPowerCallbacks: mockInitPowerCallbacks,
-  startScheduler: mockStartScheduler,
-  stopScheduler: mockStopScheduler,
-  restartScheduler: mockRestartScheduler,
-  forcePoll: mockForcePoll,
-  setSchedulerWindow: mockSetSchedulerWindow,
-  setTrayTitleCallback: mockSetTrayTitleCallback,
-  cancelPendingBrowserOpen: vi.fn(),
-  getLastKnownEvents: vi.fn().mockReturnValue(null),
+  destroyUpdateWindow: mockDestroyUpdateWindow,
 }));
 
 import { initializeApp, shutdownApp } from "../../src/main/app/lifecycle.js";
 
 const mockWindow = {}.As<import("electron").BrowserWindow>();
 
+function latestPowerCallback(): (reason: PowerReason) => void {
+  const callback = powerCallbacks.at(-1);
+  if (!callback) throw new Error("Expected lifecycle to register a power callback");
+  return callback;
+}
+
+function latestDisplayHorizonListener(): () => void {
+  const listener = displayHorizonListeners.at(-1);
+  if (!listener) throw new Error("Expected lifecycle to register a display-horizon listener");
+  return listener;
+}
+
 describe("lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    displayHorizonListeners.length = 0;
+    powerCallbacks.length = 0;
+    mockGraph.calendar.getPermissionStatus.mockResolvedValue("granted");
+    mockGraph.calendar.requestPermission.mockResolvedValue("granted");
+    mockGraph.calendar.shouldAutoRequestPermission.mockReturnValue(true);
+    mockGraph.calendar.warmup.mockResolvedValue(undefined);
+    mockGraph.settings.load.mockResolvedValue({ ok: true, value: createMockSettings() });
+    mockGraph.settings.get.mockReturnValue(createMockSettings());
+    mockGraph.scheduler.forcePoll.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    shutdownApp();
   });
 
   describe("initializeApp", () => {
-    it("calls all subsystem init functions", async () => {
+    it("initializes every graph-owned subsystem through the created graph", async () => {
       await initializeApp(mockWindow);
 
-      // IPC handlers registered with main window
-      expect(mockRegisterIpcHandlers).toHaveBeenCalledWith(mockWindow, expect.any(Object));
-
-      // Tray set up with main window
-      expect(mockSetupTray).toHaveBeenCalledWith(mockWindow, expect.any(Object));
-
-      // Scheduler receives tray callback and window reference
-      expect(mockSetTrayTitleCallback).toHaveBeenCalledWith(mockUpdateTrayTitle);
-      expect(mockSetSchedulerWindow).toHaveBeenCalledWith(mockWindow);
-
-      // Calendar permission checked before scheduler starts
-      expect(mockGetCalendarPermissionStatus).toHaveBeenCalledOnce();
-
-      // Scheduler started
-      expect(mockStartScheduler).toHaveBeenCalledOnce();
-
-      // Power management initialized with restartScheduler callback
-      expect(mockInitPowerManagement).toHaveBeenCalledOnce();
-      expect(mockInitPowerManagement).toHaveBeenCalledWith(expect.any(Function));
-
-      // Shortcuts registered
-      expect(mockRegisterShortcuts).toHaveBeenCalledOnce();
-
-      // Notification permission checked
+      expect(mockCreateAppGraph).toHaveBeenCalledOnce();
+      expect(mockGraph.calendar.warmup).toHaveBeenCalledOnce();
+      expect(mockRegisterIpcHandlers).toHaveBeenCalledWith(mockWindow, mockGraph);
+      expect(mockGraph.settings.load).toHaveBeenCalledOnce();
+      expect(mockGraph.calendar.getPermissionStatus).toHaveBeenCalledOnce();
+      expect(mockSetupTray).toHaveBeenCalledWith(mockWindow, mockGraph);
+      expect(mockGraph.scheduler.setTrayTitleCallback).toHaveBeenCalledWith(mockUpdateTrayTitle);
+      expect(mockGraph.scheduler.setWindow).toHaveBeenCalledWith(mockWindow);
+      expect(mockGraph.scheduler.initPowerCallbacks).toHaveBeenCalledWith({
+        getPollInterval: mockGetPollInterval,
+        preventSleep: mockPreventSleep,
+        allowSleep: mockAllowSleep,
+      });
+      expect(mockGraph.scheduler.start).toHaveBeenCalledOnce();
+      expect(mockGraph.watcher.start).toHaveBeenCalledOnce();
+      expect(mockRegisterShortcuts).toHaveBeenCalledWith(mockGraph);
       expect(mockCheckNotificationPermission).toHaveBeenCalledOnce();
-
-      // Auto-launch synced with settings
       expect(mockSyncAutoLaunch).toHaveBeenCalledWith(false);
-
-      // Auto-updater wired for packaged installs
       expect(mockInitAutoUpdater).toHaveBeenCalledOnce();
     });
 
     it("requests calendar permission when not determined and auto-request is allowed", async () => {
-      mockGetCalendarPermissionStatus.mockResolvedValueOnce("not-determined");
-      mockShouldAutoRequestCalendarPermission.mockReturnValueOnce(true);
+      mockGraph.calendar.getPermissionStatus.mockResolvedValueOnce("not-determined");
 
       await initializeApp(mockWindow);
 
-      expect(mockGetCalendarPermissionStatus).toHaveBeenCalledOnce();
-      expect(mockRequestCalendarPermission).toHaveBeenCalledOnce();
-      // Scheduler should still start after permission request
-      expect(mockStartScheduler).toHaveBeenCalledOnce();
+      expect(mockGraph.calendar.requestPermission).toHaveBeenCalledOnce();
+      expect(mockGraph.scheduler.start).toHaveBeenCalledOnce();
     });
 
-    it("skips auto permission request when shouldAutoRequest is false (Windows)", async () => {
-      mockGetCalendarPermissionStatus.mockResolvedValueOnce("not-determined");
-      mockShouldAutoRequestCalendarPermission.mockReturnValueOnce(false);
+    it("does not auto-request calendar permission when the graph disallows it", async () => {
+      mockGraph.calendar.getPermissionStatus.mockResolvedValueOnce("not-determined");
+      mockGraph.calendar.shouldAutoRequestPermission.mockReturnValueOnce(false);
 
       await initializeApp(mockWindow);
 
-      expect(mockGetCalendarPermissionStatus).toHaveBeenCalledOnce();
-      expect(mockRequestCalendarPermission).not.toHaveBeenCalled();
-      expect(mockStartScheduler).toHaveBeenCalledOnce();
+      expect(mockGraph.calendar.requestPermission).not.toHaveBeenCalled();
+      expect(mockGraph.scheduler.start).toHaveBeenCalledOnce();
     });
 
-    it("skips permission request when already granted", async () => {
-      mockGetCalendarPermissionStatus.mockResolvedValueOnce("granted");
+    it.each(["granted", "denied"] as const)(
+      "does not request calendar permission when status is %s",
+      async (permission) => {
+        mockGraph.calendar.getPermissionStatus.mockResolvedValueOnce(permission);
 
-      await initializeApp(mockWindow);
+        await initializeApp(mockWindow);
 
-      expect(mockGetCalendarPermissionStatus).toHaveBeenCalledOnce();
-      expect(mockRequestCalendarPermission).not.toHaveBeenCalled();
-    });
+        expect(mockGraph.calendar.requestPermission).not.toHaveBeenCalled();
+      },
+    );
 
-    it("skips permission request when denied", async () => {
-      mockGetCalendarPermissionStatus.mockResolvedValueOnce("denied");
-
-      await initializeApp(mockWindow);
-
-      expect(mockGetCalendarPermissionStatus).toHaveBeenCalledOnce();
-      expect(mockRequestCalendarPermission).not.toHaveBeenCalled();
-    });
-
-    it("syncs auto-launch with launchAtLogin from settings", async () => {
-      mockGetSettings.mockReturnValue(createMockSettings({ launchAtLogin: true }));
+    it("syncs auto-launch with graph settings", async () => {
+      mockGraph.settings.get.mockReturnValueOnce(createMockSettings({ launchAtLogin: true }));
 
       await initializeApp(mockWindow);
 
       expect(mockSyncAutoLaunch).toHaveBeenCalledWith(true);
     });
+
+    it("republishes through the created graph before forcing the tray refresh", async () => {
+      const callOrder: string[] = [];
+      mockGraph.scheduler.republishUiForDisplayTick.mockImplementationOnce(() => {
+        callOrder.push("republish");
+      });
+      mockForceTrayMenuRefresh.mockImplementationOnce(() => {
+        callOrder.push("tray");
+      });
+      await initializeApp(mockWindow);
+
+      latestDisplayHorizonListener()();
+
+      expect(mockGraph.scheduler.republishUiForDisplayTick).toHaveBeenCalledOnce();
+      expect(mockForceTrayMenuRefresh).toHaveBeenCalledOnce();
+      expect(callOrder).toEqual(["republish", "tray"]);
+    });
   });
 
   describe("power callback", () => {
-    it("invalidates permission cache and forcePolls on wake/unlock without full restart", async () => {
-      await initializeApp(mockWindow);
-
-      expect(mockInitPowerManagement).toHaveBeenCalledOnce();
-      const callback = mockInitPowerManagement.mock.calls[0]?.[0] as
-        ((reason: "battery" | "ac" | "resume" | "unlock") => void) | undefined;
-      expect(typeof callback).toBe("function");
-
+    it("invalidates, revives, and polls the created graph on resume", async () => {
       const callOrder: string[] = [];
-      mockInvalidateCalendarPermissionCache.mockImplementation(() => callOrder.push("invalidate"));
-      mockForcePoll.mockImplementation(async () => {
+      mockGraph.calendar.invalidatePermissionCache.mockImplementationOnce(() => {
+        callOrder.push("invalidate");
+      });
+      mockGraph.watcher.revive.mockImplementationOnce(() => {
+        callOrder.push("revive");
+      });
+      mockGraph.scheduler.forcePoll.mockImplementationOnce(async () => {
         callOrder.push("forcePoll");
         return null;
       });
-      mockReviveCalendarWatcher.mockImplementation(() => callOrder.push("revive"));
+      await initializeApp(mockWindow);
 
-      callback!("resume");
+      latestPowerCallback()("resume");
 
-      expect(mockInvalidateCalendarPermissionCache).toHaveBeenCalledOnce();
-      expect(mockReviveCalendarWatcher).toHaveBeenCalledOnce();
-      expect(mockForcePoll).toHaveBeenCalledWith({ reason: "power" });
-      expect(mockRestartScheduler).not.toHaveBeenCalled();
+      expect(mockGraph.scheduler.forcePoll).toHaveBeenCalledWith({ reason: "power" });
+      expect(mockGraph.scheduler.restart).not.toHaveBeenCalled();
       expect(callOrder).toEqual(["invalidate", "revive", "forcePoll"]);
     });
 
-    it("forcePolls on AC/battery without invalidating permission cache", async () => {
+    it("polls the created graph on battery changes without invalidating permission", async () => {
       await initializeApp(mockWindow);
-      const callback = mockInitPowerManagement.mock.calls[0]?.[0] as
-        ((reason: "battery" | "ac" | "resume" | "unlock") => void) | undefined;
-      callback!("battery");
-      expect(mockForcePoll).toHaveBeenCalledWith({ reason: "power" });
-      expect(mockInvalidateCalendarPermissionCache).not.toHaveBeenCalled();
-      expect(mockRestartScheduler).not.toHaveBeenCalled();
+
+      latestPowerCallback()("battery");
+
+      expect(mockGraph.scheduler.forcePoll).toHaveBeenCalledWith({ reason: "power" });
+      expect(mockGraph.calendar.invalidatePermissionCache).not.toHaveBeenCalled();
+      expect(mockGraph.watcher.revive).not.toHaveBeenCalled();
+      expect(mockGraph.scheduler.restart).not.toHaveBeenCalled();
     });
   });
 
   describe("fail-fast", () => {
-    it("aborts init when setupTray throws (startScheduler not called)", async () => {
+    it("aborts before scheduler start when tray setup throws", async () => {
       const electron = await import("electron");
       mockSetupTray.mockImplementationOnce(() => {
         throw new Error("tray boom");
@@ -335,12 +332,12 @@ describe("lifecycle", () => {
         expect.stringContaining("setupTray"),
       );
       expect(electron.app.quit).toHaveBeenCalled();
-      expect(mockStartScheduler).not.toHaveBeenCalled();
+      expect(mockGraph.scheduler.start).not.toHaveBeenCalled();
     });
 
-    it("aborts init when loadSettings throws (startScheduler not called)", async () => {
+    it("aborts before scheduler start when settings load throws", async () => {
       const electron = await import("electron");
-      mockLoadSettings.mockRejectedValueOnce(new Error("fs boom"));
+      mockGraph.settings.load.mockRejectedValueOnce(new Error("fs boom"));
 
       await initializeApp(mockWindow);
 
@@ -349,57 +346,60 @@ describe("lifecycle", () => {
         expect.stringContaining("loadSettings"),
       );
       expect(electron.app.quit).toHaveBeenCalled();
-      expect(mockStartScheduler).not.toHaveBeenCalled();
+      expect(mockGraph.scheduler.start).not.toHaveBeenCalled();
     });
   });
 
   describe("shutdownApp", () => {
-    it("calls cleanupPowerManagement and stopScheduler", () => {
-      shutdownApp();
-
-      expect(mockCleanupPowerManagement).toHaveBeenCalledOnce();
-      expect(mockStopScheduler).toHaveBeenCalledOnce();
-    });
-
-    it("force-destroys hide-cached dialog windows", () => {
-      shutdownApp();
-
-      expect(mockDestroyAlertWindow).toHaveBeenCalledOnce();
-      expect(mockDestroySettingsWindow).toHaveBeenCalledOnce();
-      expect(mockDestroyAboutWindow).toHaveBeenCalledOnce();
-      expect(mockDestroyUpdateWindow).toHaveBeenCalledOnce();
-    });
-
-    it("destroys dialogs after power cleanup and before scheduler stop", () => {
+    it("stops the same graph after process and window cleanup", async () => {
       const callOrder: string[] = [];
-      mockCleanupPowerManagement.mockImplementation(() => callOrder.push("cleanup"));
-      mockDestroyAlertWindow.mockImplementation(() => callOrder.push("destroy-alert"));
-      mockDestroySettingsWindow.mockImplementation(() => callOrder.push("destroy-settings"));
-      mockDestroyAboutWindow.mockImplementation(() => callOrder.push("destroy-about"));
-      mockDestroyUpdateWindow.mockImplementation(() => callOrder.push("destroy-update"));
-      mockStopScheduler.mockImplementation(() => callOrder.push("stop"));
+      await initializeApp(mockWindow);
+      mockCleanupPowerManagement.mockImplementationOnce(() => callOrder.push("power"));
+      mockUnsubscribeDisplayHorizon.mockImplementationOnce(() =>
+        callOrder.push("unsubscribe-horizon"),
+      );
+      mockClearDisplayHorizon.mockImplementationOnce(() => callOrder.push("clear-horizon"));
+      mockDestroyAlertWindow.mockImplementationOnce(() => callOrder.push("destroy-alert"));
+      mockDestroySettingsWindow.mockImplementationOnce(() => callOrder.push("destroy-settings"));
+      mockDestroyAboutWindow.mockImplementationOnce(() => callOrder.push("destroy-about"));
+      mockDestroyUpdateWindow.mockImplementationOnce(() => callOrder.push("destroy-update"));
+      mockGraph.scheduler.stop.mockImplementationOnce(() => callOrder.push("stop-scheduler"));
+      mockGraph.watcher.stop.mockImplementationOnce(() => callOrder.push("stop-watcher"));
+      mockUnregisterShortcuts.mockImplementationOnce(() => callOrder.push("unregister-shortcuts"));
 
       shutdownApp();
 
       expect(callOrder).toEqual([
-        "cleanup",
+        "power",
+        "unsubscribe-horizon",
+        "clear-horizon",
         "destroy-alert",
         "destroy-settings",
         "destroy-about",
         "destroy-update",
-        "stop",
+        "stop-scheduler",
+        "stop-watcher",
+        "unregister-shortcuts",
       ]);
-    });
-
-    it("calls cleanupPowerManagement before stopScheduler", () => {
-      const callOrder: string[] = [];
-      mockCleanupPowerManagement.mockImplementation(() => callOrder.push("cleanup"));
-      mockStopScheduler.mockImplementation(() => callOrder.push("stop"));
+      expect(mockGraph.scheduler.stop).toHaveBeenCalledOnce();
+      expect(mockGraph.watcher.stop).toHaveBeenCalledOnce();
 
       shutdownApp();
+      expect(mockGraph.scheduler.stop).toHaveBeenCalledOnce();
+      expect(mockGraph.watcher.stop).toHaveBeenCalledOnce();
+    });
 
-      expect(callOrder[0]).toBe("cleanup");
-      expect(callOrder[callOrder.length - 1]).toBe("stop");
+    it("keeps graph-owned teardown a no-op before initialization", () => {
+      shutdownApp();
+
+      expect(mockCleanupPowerManagement).toHaveBeenCalledOnce();
+      expect(mockDestroyAlertWindow).toHaveBeenCalledOnce();
+      expect(mockDestroySettingsWindow).toHaveBeenCalledOnce();
+      expect(mockDestroyAboutWindow).toHaveBeenCalledOnce();
+      expect(mockDestroyUpdateWindow).toHaveBeenCalledOnce();
+      expect(mockGraph.scheduler.stop).not.toHaveBeenCalled();
+      expect(mockGraph.watcher.stop).not.toHaveBeenCalled();
+      expect(mockUnregisterShortcuts).toHaveBeenCalledOnce();
     });
   });
 });
