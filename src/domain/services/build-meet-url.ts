@@ -4,7 +4,7 @@
  * - Zoom: appends `?uname=email`
  * - Unknown platform: returns base URL as-is
  *
- * Opening URLs lives in main (`utils/meet-url.ts` → shell.openExternal).
+ * URL opening lives in main (`src/main/infrastructure/electron/shell-meeting-opener.ts`).
  */
 
 import type { MeetingEvent } from "../entities/meeting-event.js";
