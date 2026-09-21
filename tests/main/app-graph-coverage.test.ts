@@ -1,170 +1,168 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { JoinMeetingDeps } from "../../src/main/application/use-cases/join-meeting.js";
+import type { CalendarWatcherDependencies } from "../../src/main/facades/calendar-watcher.js";
+import type { SchedulerDependencies } from "../../src/main/scheduler/facade.js";
 
 const {
-  getCalendarEventsResult,
-  refreshCalendarPublication,
-  requestCalendarPermission,
-  getCalendarPermissionStatus,
-  disconnectCalendar,
-  getCalendarUiState,
-  warmupCalendarProvider,
-  invalidateCalendarPermissionCache,
-  shouldAutoRequestCalendarPermission,
-  reportCalendarPollError,
-  rebindCalendarDefaults,
-  loadSettings,
-  getSettings,
-  updateSettings,
-  saveSettings,
-  rebindSettingsDefaults,
-  startCalendarWatcher,
-  stopCalendarWatcher,
-  reviveCalendarWatcher,
+  constructionOrder,
+  calendarFacade,
+  settingsFacade,
+  schedulerFacade,
+  watcher,
+  createCalendarFacade,
+  createSettingsFacade,
+  createSchedulerFacade,
+  createJoinMeeting,
+  createCalendarWatcher,
+  createShellMeetingOpener,
   joinMeetingById,
-  rebindJoinMeetingDefaults,
-  forcePoll,
-  getLastKnownEvents,
-  cancelPendingBrowserOpen,
-  startScheduler,
-  stopScheduler,
-  restartScheduler,
-  setSchedulerWindow,
-  setTrayTitleCallback,
-  initPowerCallbacks,
   openMock,
-} = vi.hoisted(() => ({
-  getCalendarEventsResult: vi.fn().mockResolvedValue({ kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] }),
-  refreshCalendarPublication: vi.fn().mockResolvedValue({
+} = vi.hoisted(() => {
+  const constructionOrder: string[] = [];
+  const publication = {
     publicationGeneration: 1,
-    result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] },
-  }),
-  requestCalendarPermission: vi.fn().mockResolvedValue("granted"),
-  getCalendarPermissionStatus: vi.fn().mockResolvedValue("granted"),
-  disconnectCalendar: vi.fn().mockResolvedValue(undefined),
-  getCalendarUiState: vi.fn().mockReturnValue({
-    permission: "granted",
-    phase: "ready",
-    lastError: null,
-    accountEmail: "a@b.com",
-    events: [],
-    offline: false,
-    oauthConfigured: true,
-  }),
-  warmupCalendarProvider: vi.fn().mockResolvedValue(undefined),
-  invalidateCalendarPermissionCache: vi.fn(),
-  shouldAutoRequestCalendarPermission: vi.fn().mockReturnValue(false),
-  reportCalendarPollError: vi.fn(),
-  rebindCalendarDefaults: vi.fn(),
-  loadSettings: vi.fn().mockResolvedValue({ ok: true, value: { openBeforeMinutes: 1 } }),
-  getSettings: vi.fn().mockReturnValue({ openBeforeMinutes: 1 }),
-  updateSettings: vi.fn().mockResolvedValue({ openBeforeMinutes: 2 }),
-  saveSettings: vi.fn().mockResolvedValue(undefined),
-  rebindSettingsDefaults: vi.fn(),
-  startCalendarWatcher: vi.fn(),
-  stopCalendarWatcher: vi.fn(),
-  reviveCalendarWatcher: vi.fn(),
-  joinMeetingById: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
-  rebindJoinMeetingDefaults: vi.fn(),
-  forcePoll: vi.fn().mockResolvedValue(undefined),
-  getLastKnownEvents: vi.fn().mockReturnValue(null),
-  cancelPendingBrowserOpen: vi.fn(),
-  startScheduler: vi.fn(),
-  stopScheduler: vi.fn(),
-  restartScheduler: vi.fn(),
-  setSchedulerWindow: vi.fn(),
-  setTrayTitleCallback: vi.fn(),
-  initPowerCallbacks: vi.fn(),
-  openMock: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
-}));
+    result: {
+      kind: "ok" as const,
+      source: "live" as const,
+      completeness: "complete" as const,
+      observedAt: Date.now(),
+      events: [],
+    },
+  };
+  const calendarFacade = {
+    refreshCalendarPublication: vi.fn().mockResolvedValue(publication),
+    getCalendarEventsResult: vi.fn().mockResolvedValue(publication.result),
+    getLastPublication: vi.fn().mockReturnValue(publication),
+    cancelActiveCalendarRefresh: vi.fn(),
+    requestCalendarPermission: vi.fn().mockResolvedValue("granted"),
+    getCalendarPermissionStatus: vi.fn().mockResolvedValue("granted"),
+    invalidateCalendarPermissionCache: vi.fn(),
+    shouldAutoRequestCalendarPermission: vi.fn().mockReturnValue(false),
+    warmupCalendarProvider: vi.fn().mockResolvedValue(undefined),
+    disconnectCalendar: vi.fn().mockResolvedValue(undefined),
+    reportCalendarPollError: vi.fn(),
+    getCalendarUiState: vi.fn().mockReturnValue({ phase: "ready" }),
+    getCalendarPort: vi.fn().mockResolvedValue({}),
+  };
+  const settingsFacade = {
+    load: vi.fn(),
+    save: vi.fn(),
+    get: vi.fn(),
+    update: vi.fn(),
+  };
+  const schedulerFacade = {
+    forcePoll: vi.fn().mockResolvedValue(publication),
+    start: vi.fn(),
+    stop: vi.fn(),
+    restart: vi.fn(),
+    setWindow: vi.fn(),
+    setTrayTitleCallback: vi.fn(),
+    initPowerCallbacks: vi.fn(),
+    getLastKnownEvents: vi.fn().mockReturnValue(null),
+    republishUiForDisplayTick: vi.fn(),
+    cancelPendingBrowserOpen: vi.fn(),
+  };
+  const watcher = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    revive: vi.fn(),
+  };
+  const joinMeetingById = vi.fn().mockResolvedValue({ ok: true as const, value: undefined });
+  const openMock = vi.fn().mockResolvedValue({ ok: true as const, value: undefined });
 
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  getCalendarEventsResult,
-  refreshCalendarPublication,
-  requestCalendarPermission,
-  getCalendarPermissionStatus,
-  disconnectCalendar,
-  getCalendarUiState,
-  warmupCalendarProvider,
-  invalidateCalendarPermissionCache,
-  shouldAutoRequestCalendarPermission,
-  reportCalendarPollError,
-  rebindCalendarDefaults,
-}));
+  return {
+    constructionOrder,
+    calendarFacade,
+    settingsFacade,
+    schedulerFacade,
+    watcher,
+    createCalendarFacade: vi.fn(() => {
+      constructionOrder.push("calendar");
+      return calendarFacade;
+    }),
+    createSettingsFacade: vi.fn(() => {
+      constructionOrder.push("settings");
+      return settingsFacade;
+    }),
+    createSchedulerFacade: vi.fn((_dependencies: SchedulerDependencies) => {
+      constructionOrder.push("scheduler");
+      return schedulerFacade;
+    }),
+    createJoinMeeting: vi.fn((_dependencies: JoinMeetingDeps) => {
+      constructionOrder.push("join");
+      return { execute: joinMeetingById };
+    }),
+    createCalendarWatcher: vi.fn((_dependencies: CalendarWatcherDependencies) => {
+      constructionOrder.push("watcher");
+      return watcher;
+    }),
+    createShellMeetingOpener: vi.fn(() => {
+      constructionOrder.push("opener");
+      return { open: openMock };
+    }),
+    joinMeetingById,
+    openMock,
+  };
+});
 
-vi.mock("../../src/main/facades/settings.js", () => ({
-  loadSettings,
-  getSettings,
-  updateSettings,
-  saveSettings,
-  rebindSettingsDefaults,
-}));
-
-vi.mock("../../src/main/facades/calendar-watcher.js", () => ({
-  startCalendarWatcher,
-  stopCalendarWatcher,
-  reviveCalendarWatcher,
-}));
-
-vi.mock("../../src/main/utils/join-meeting.js", () => ({
-  joinMeetingById,
-  rebindJoinMeetingDefaults,
-}));
-
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  forcePoll,
-  getLastKnownEvents,
-  cancelPendingBrowserOpen,
-  startScheduler,
-  stopScheduler,
-  restartScheduler,
-  setSchedulerWindow,
-  setTrayTitleCallback,
-  initPowerCallbacks,
-}));
-
+vi.mock("../../src/main/facades/calendar.js", () => ({ createCalendarFacade }));
+vi.mock("../../src/main/facades/settings.js", () => ({ createSettingsFacade }));
+vi.mock("../../src/main/scheduler/facade.js", () => ({ createSchedulerFacade }));
+vi.mock("../../src/main/application/use-cases/join-meeting.js", () => ({ createJoinMeeting }));
+vi.mock("../../src/main/facades/calendar-watcher.js", () => ({ createCalendarWatcher }));
 vi.mock("../../src/main/infrastructure/electron/shell-meeting-opener.js", () => ({
-  createShellMeetingOpener: () => ({ open: openMock }),
+  createShellMeetingOpener,
 }));
 
 import { createAppGraph } from "../../src/main/composition/app-graph.js";
-import { asTestEventId } from "../helpers/test-utils.js";
+import { asTestEventId, createMockSettings } from "../helpers/test-utils.js";
 
 describe("createAppGraph surface coverage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    constructionOrder.length = 0;
   });
 
-  it("exposes and invokes all graph surfaces with real return values", async () => {
-    const graph = createAppGraph({ skipBind: true });
-    expect(await graph.calendar.getEvents()).toMatchObject({
-      publicationGeneration: 1,
-      result: { kind: "ok", source: "live", completeness: "complete", events: [] },
-    });
-    expect(await graph.calendar.getEventsResult()).toEqual({
-      kind: "ok",
-      source: "live",
-      completeness: "complete",
-      observedAt: expect.any(Number),
-      events: [],
-    });
+  it("constructs factories in dependency order and invokes every graph surface", async () => {
+    const settings = createMockSettings({ openBeforeMinutes: 1 });
+    const updatedSettings = createMockSettings({ openBeforeMinutes: 2 });
+    settingsFacade.load.mockResolvedValue({ ok: true, value: settings });
+    settingsFacade.get.mockReturnValue(settings);
+    settingsFacade.update.mockResolvedValue(updatedSettings);
+    settingsFacade.save.mockResolvedValue(undefined);
+
+    const graph = createAppGraph();
+
+    expect(constructionOrder).toEqual([
+      "opener",
+      "calendar",
+      "settings",
+      "scheduler",
+      "join",
+      "watcher",
+    ]);
+    expect(createCalendarFacade).toHaveBeenCalledOnce();
+    expect(createSettingsFacade).toHaveBeenCalledOnce();
+    expect(createSchedulerFacade).toHaveBeenCalledOnce();
+    expect(createJoinMeeting).toHaveBeenCalledOnce();
+    expect(createCalendarWatcher).toHaveBeenCalledOnce();
+
+    expect(await graph.calendar.getEvents()).toMatchObject({ publicationGeneration: 1 });
+    expect((await graph.calendar.getEventsResult()).kind).toBe("ok");
     expect(await graph.calendar.requestPermission()).toBe("granted");
     expect(await graph.calendar.getPermissionStatus()).toBe("granted");
     await graph.calendar.disconnect();
-    expect(disconnectCalendar).toHaveBeenCalledOnce();
     expect(graph.calendar.getUiState().phase).toBe("ready");
     await graph.calendar.warmup();
-    expect(warmupCalendarProvider).toHaveBeenCalledOnce();
     graph.calendar.invalidatePermissionCache();
-    expect(invalidateCalendarPermissionCache).toHaveBeenCalledOnce();
     expect(graph.calendar.shouldAutoRequestPermission()).toBe(false);
     graph.calendar.reportPollError("e", null);
-    expect(reportCalendarPollError).toHaveBeenCalledWith("e", null);
+    expect(calendarFacade.reportCalendarPollError).toHaveBeenCalledWith("e", null);
 
-    expect(await graph.settings.load()).toEqual({ ok: true, value: { openBeforeMinutes: 1 } });
-    expect(graph.settings.get()).toEqual({ openBeforeMinutes: 1 });
-    expect(await graph.settings.update({ openBeforeMinutes: 2 })).toEqual({ openBeforeMinutes: 2 });
-    await graph.settings.save({ openBeforeMinutes: 2 } as never);
-    expect(saveSettings).toHaveBeenCalled();
+    expect(await graph.settings.load()).toEqual({ ok: true, value: settings });
+    expect(graph.settings.get()).toBe(settings);
+    expect(await graph.settings.update({ openBeforeMinutes: 2 })).toBe(updatedSettings);
+    await graph.settings.save(updatedSettings);
 
     const id = asTestEventId("e1");
     expect(await graph.join.byId(id)).toEqual({ ok: true, value: undefined });
@@ -173,46 +171,72 @@ describe("createAppGraph surface coverage", () => {
       ok: true,
       value: undefined,
     });
-    expect(openMock).toHaveBeenCalled();
+    expect(openMock).toHaveBeenCalledOnce();
 
     await graph.scheduler.forcePoll();
-    expect(forcePoll).toHaveBeenCalledOnce();
     expect(graph.scheduler.getLastKnownEvents()).toBeNull();
+    graph.scheduler.republishUiForDisplayTick();
     graph.scheduler.cancelPendingBrowserOpen(id);
-    expect(cancelPendingBrowserOpen).toHaveBeenCalledWith(id);
     graph.scheduler.start();
     graph.scheduler.stop();
     graph.scheduler.restart();
-    expect(startScheduler).toHaveBeenCalledOnce();
-    expect(stopScheduler).toHaveBeenCalledOnce();
-    expect(restartScheduler).toHaveBeenCalledOnce();
-    const win = {} as never;
-    graph.scheduler.setWindow(win);
-    expect(setSchedulerWindow).toHaveBeenCalledWith(win);
-    const cb = () => {};
-    graph.scheduler.setTrayTitleCallback(cb);
-    expect(setTrayTitleCallback).toHaveBeenCalledWith(cb);
+    graph.scheduler.setWindow({} as never);
+    const updateTrayTitle = (): void => {};
+    graph.scheduler.setTrayTitleCallback(updateTrayTitle);
     const power = {
-      getPollInterval: () => 120000,
+      getPollInterval: () => 120_000,
       preventSleep: () => {},
       allowSleep: () => {},
     };
     graph.scheduler.initPowerCallbacks(power);
-    expect(initPowerCallbacks).toHaveBeenCalledWith(power);
+    expect(schedulerFacade.republishUiForDisplayTick).toHaveBeenCalledOnce();
 
     graph.watcher.start();
     graph.watcher.stop();
     graph.watcher.revive();
-    expect(startCalendarWatcher).toHaveBeenCalledOnce();
-    expect(stopCalendarWatcher).toHaveBeenCalledOnce();
-    expect(reviveCalendarWatcher).toHaveBeenCalledOnce();
+    expect(watcher.start).toHaveBeenCalledOnce();
+    expect(watcher.stop).toHaveBeenCalledOnce();
+    expect(watcher.revive).toHaveBeenCalledOnce();
   });
 
-  it("skipBind false rebinds free-function defaults", () => {
-    createAppGraph({ skipBind: false });
-    expect(rebindCalendarDefaults).toHaveBeenCalledOnce();
-    expect(rebindSettingsDefaults).toHaveBeenCalledOnce();
-    // bindComposition + post-opener rebind after single egress instance is installed
-    expect(rebindJoinMeetingDefaults).toHaveBeenCalledTimes(2);
+  it("passes finalized surfaces into downstream factories", () => {
+    const getEvents = vi.fn();
+    const getEventsResult = vi.fn();
+    const reportPollError = vi.fn();
+    const getSettings = vi.fn();
+    const forcePoll = vi.fn();
+    const getLastKnownEvents = vi.fn();
+    const cancelPendingBrowserOpen = vi.fn();
+    const open = vi.fn();
+    const opener = { open };
+
+    const graph = createAppGraph({
+      calendar: { getEvents, getEventsResult, reportPollError },
+      settings: { get: getSettings },
+      scheduler: { forcePoll, getLastKnownEvents, cancelPendingBrowserOpen },
+      opener,
+    });
+
+    expect(createSchedulerFacade).toHaveBeenCalledWith({
+      calendar: {
+        refreshCalendarPublication: getEvents,
+        getLastPublication: calendarFacade.getLastPublication,
+        cancelActiveCalendarRefresh: calendarFacade.cancelActiveCalendarRefresh,
+        reportCalendarPollError: reportPollError,
+      },
+      settings: { get: getSettings },
+      opener,
+    });
+    expect(createJoinMeeting).toHaveBeenCalledWith({
+      getLastKnownEvents,
+      fetchCalendarEvents: getEventsResult,
+      opener,
+      cancelPendingBrowserOpen,
+    });
+    expect(createCalendarWatcher).toHaveBeenCalledWith({
+      getCalendarPort: calendarFacade.getCalendarPort,
+      forcePoll,
+    });
+    expect(graph.opener).toBe(opener);
   });
 });

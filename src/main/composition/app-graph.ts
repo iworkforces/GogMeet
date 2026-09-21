@@ -7,41 +7,16 @@ import type { MeetingEvent } from "../../domain/entities/meeting-event.js";
 import type { AppSettings } from "../../domain/entities/settings.js";
 import type { Result } from "../../domain/entities/result.js";
 import type { MeetingOpenerPort } from "../application/ports/meeting-opener-port.js";
-import type { PowerCallbacks } from "../scheduler/state/index.js";
+import { createJoinMeeting } from "../application/use-cases/join-meeting.js";
+import { createCalendarFacade } from "../facades/calendar.js";
+import { createCalendarWatcher } from "../facades/calendar-watcher.js";
+import { createSettingsFacade } from "../facades/settings.js";
 import { createShellMeetingOpener } from "../infrastructure/electron/shell-meeting-opener.js";
 import {
-  getCalendarEventsResult,
-  refreshCalendarPublication,
-  requestCalendarPermission,
-  getCalendarPermissionStatus,
-  disconnectCalendar,
-  getCalendarUiState,
-  warmupCalendarProvider,
-  invalidateCalendarPermissionCache,
-  shouldAutoRequestCalendarPermission,
-  reportCalendarPollError,
-} from "../facades/calendar.js";
-import {
-  startCalendarWatcher,
-  stopCalendarWatcher,
-  reviveCalendarWatcher,
-} from "../facades/calendar-watcher.js";
-import { getSettings, loadSettings, updateSettings, saveSettings } from "../facades/settings.js";
-import { joinMeetingById, rebindJoinMeetingDefaults } from "../utils/join-meeting.js";
-import { bindMeetingOpener } from "../utils/meet-url.js";
-import {
-  forcePoll,
-  getLastKnownEvents,
-  cancelPendingBrowserOpen,
-  startScheduler,
-  stopScheduler,
-  restartScheduler,
-  setSchedulerWindow,
-  setTrayTitleCallback,
-  initPowerCallbacks,
+  createSchedulerFacade,
   type ForcePollOptions,
+  type PowerCallbacks,
 } from "../scheduler/facade.js";
-import { bindComposition } from "./bind-composition.js";
 
 /** Calendar surface exposed on the app graph. */
 export interface AppGraphCalendar {
@@ -88,6 +63,7 @@ export interface AppGraphScheduler {
   forcePoll(options?: ForcePollOptions): Promise<CalendarPublication | null>;
   /** Cached last poll result for join/shortcuts without starting a refresh. */
   getLastKnownEvents(): CalendarResult | null;
+  republishUiForDisplayTick(): void;
   /** Cancel a pending auto-open timer and mark the event fired (e.g. alert dismiss). */
   cancelPendingBrowserOpen(id: EventId): void;
   /** Start background polling (idempotent while already running). */
@@ -138,94 +114,73 @@ export interface AppGraph {
   readonly watcher: AppGraphWatcher;
 }
 
-export interface CreateAppGraphOptions {
-  /** Skip rebinding free-function defaults (tests that mock facades). */
-  readonly skipBind?: boolean;
-  /** Override the default shell meeting opener (tests / alternate adapters). */
+export interface AppGraphOverrides {
+  readonly calendar?: Partial<AppGraphCalendar>;
+  readonly settings?: Partial<AppGraphSettings>;
+  readonly scheduler?: Partial<AppGraphScheduler>;
+  readonly join?: Partial<AppGraph["join"]>;
   readonly opener?: MeetingOpenerPort;
+  readonly watcher?: Partial<AppGraphWatcher>;
 }
 
 /**
- * Build the production app graph and rebind free-function defaults.
+ * Build one dependency-ordered production app graph.
  */
-export function createAppGraph(options: CreateAppGraphOptions = {}): AppGraph {
-  if (!options.skipBind) {
-    bindComposition();
-  }
+export function createAppGraph(overrides: AppGraphOverrides = {}): AppGraph {
+  const opener = overrides.opener ?? createShellMeetingOpener();
 
-  const opener = options.opener ?? createShellMeetingOpener();
-  // Share one egress instance for IPC + join + auto-open in production graphs.
-  // skipBind test graphs keep their own mocks; only rebind when composition is live
-  // or the caller injected an explicit opener.
-  if (!options.skipBind || options.opener !== undefined) {
-    bindMeetingOpener(opener);
-    if (!options.skipBind) {
-      rebindJoinMeetingDefaults();
-    }
-  }
-
-  return {
-    calendar: {
-      getEvents: () => refreshCalendarPublication(),
-      getEventsResult: () => getCalendarEventsResult(),
-      requestPermission: () => requestCalendarPermission(),
-      getPermissionStatus: () => getCalendarPermissionStatus(),
-      disconnect: () => disconnectCalendar(),
-      getUiState: () => getCalendarUiState(),
-      warmup: () => warmupCalendarProvider(),
-      invalidatePermissionCache: () => {
-        invalidateCalendarPermissionCache();
-      },
-      shouldAutoRequestPermission: () => shouldAutoRequestCalendarPermission(),
-      reportPollError: (error, lastEvents) => {
-        reportCalendarPollError(error, lastEvents);
-      },
-    },
-    settings: {
-      load: () => loadSettings(),
-      get: () => getSettings(),
-      update: (partial) => updateSettings(partial),
-      save: (settings) => saveSettings(settings),
-    },
-    join: {
-      byId: (id) => joinMeetingById(id),
-    },
-    opener,
-    scheduler: {
-      forcePoll: (options) => forcePoll(options),
-      getLastKnownEvents: () => getLastKnownEvents(),
-      cancelPendingBrowserOpen: (id) => {
-        cancelPendingBrowserOpen(id);
-      },
-      start: () => {
-        startScheduler();
-      },
-      stop: (options) => {
-        stopScheduler(options);
-      },
-      restart: () => {
-        restartScheduler();
-      },
-      setWindow: (w) => {
-        setSchedulerWindow(w);
-      },
-      setTrayTitleCallback: (fn) => {
-        setTrayTitleCallback(fn);
-      },
-      initPowerCallbacks: (callbacks) => {
-        initPowerCallbacks(callbacks);
-      },
-    },
-    watcher: {
-      start: () => {
-        startCalendarWatcher();
-      },
-      stop: () => {
-        stopCalendarWatcher();
-      },
-      revive: () => {
-        reviveCalendarWatcher();
-      },
-    },
+  const calendarFacade = createCalendarFacade();
+  const calendar: AppGraphCalendar = {
+    getEvents: calendarFacade.refreshCalendarPublication,
+    getEventsResult: calendarFacade.getCalendarEventsResult,
+    requestPermission: calendarFacade.requestCalendarPermission,
+    getPermissionStatus: calendarFacade.getCalendarPermissionStatus,
+    disconnect: calendarFacade.disconnectCalendar,
+    getUiState: calendarFacade.getCalendarUiState,
+    warmup: calendarFacade.warmupCalendarProvider,
+    invalidatePermissionCache: calendarFacade.invalidateCalendarPermissionCache,
+    shouldAutoRequestPermission: calendarFacade.shouldAutoRequestCalendarPermission,
+    reportPollError: calendarFacade.reportCalendarPollError,
+    ...overrides.calendar,
   };
+
+  const settings: AppGraphSettings = {
+    ...createSettingsFacade(),
+    ...overrides.settings,
+  };
+
+  const scheduler: AppGraphScheduler = {
+    ...createSchedulerFacade({
+      calendar: {
+        refreshCalendarPublication: calendar.getEvents,
+        getLastPublication: calendarFacade.getLastPublication,
+        cancelActiveCalendarRefresh: calendarFacade.cancelActiveCalendarRefresh,
+        reportCalendarPollError: calendar.reportPollError,
+      },
+      settings: { get: settings.get },
+      opener,
+    }),
+    ...overrides.scheduler,
+  };
+
+  const joinMeeting = createJoinMeeting({
+    getLastKnownEvents: scheduler.getLastKnownEvents,
+    fetchCalendarEvents: calendar.getEventsResult,
+    opener,
+    cancelPendingBrowserOpen: scheduler.cancelPendingBrowserOpen,
+  });
+  const join: AppGraph["join"] = {
+    byId: joinMeeting.execute,
+    ...overrides.join,
+  };
+
+  const watcher: AppGraphWatcher = {
+    ...createCalendarWatcher({
+      getCalendarPort: calendarFacade.getCalendarPort,
+      forcePoll: scheduler.forcePoll,
+    }),
+    ...overrides.watcher,
+  };
+
+  return { opener, calendar, settings, scheduler, join, watcher };
 }
