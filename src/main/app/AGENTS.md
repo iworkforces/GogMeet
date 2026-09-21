@@ -21,8 +21,8 @@
 - `initializeApp()` calls `createAppGraph()` and stores `activeGraph` before IPC or dependent subsystem work.
 - The graph supplies calendar, settings, scheduler, watcher, join, and opener surfaces to lifecycle, tray, shortcuts, and IPC. Lifecycle still owns process-wide wiring such as display horizon, power, notifications, auto-launch, and updater initialization.
 - Settings load before scheduler start. Calendar permission status is always checked; only Darwin may request a not-determined permission during lifecycle. Windows OAuth remains user initiated from tray or Settings.
-- Display-horizon wiring comes before scheduler start and calls `republishUiForDisplayTick()` plus `forceTrayMenuRefresh()`. This repushes display state and never arms automation.
-- Shutdown removes power and display-horizon wiring, destroys alert, settings, about, and update windows, stops graph scheduler and watcher, unregisters shortcuts, then clears `activeGraph`. If no graph exists, lifecycle uses its scheduler and watcher fallback cleanup.
+- Display-horizon wiring comes before scheduler start and calls `graph.scheduler.republishUiForDisplayTick()` plus `forceTrayMenuRefresh()`. This repushes display state and never arms automation.
+- Shutdown removes power and display-horizon wiring, destroys alert, settings, about, and update windows, stops the active graph's scheduler and watcher, unregisters shortcuts, then clears `activeGraph`. Before initialization, graph teardown is a no-op.
 - `probeSafe` suppresses power, shortcuts, notification permission, auto-launch, and updater work. It is startup-probe lifecycle behavior, not a general reduced product mode.
 
 ## Packaged measurement probes

@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
 import type { TitleCountdownParams } from "../../src/main/scheduler/title-countdown.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import type {
+  SchedulerState,
+  ScheduledEventSnapshot,
+} from "../../src/main/scheduler/state/index.js";
+import { createSchedulerState } from "../../src/main/scheduler/state/index.js";
+import { asTestEventId } from "../helpers/test-utils.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 // Mock power module
 vi.mock("../../src/main/system/power.js", () => ({
@@ -22,9 +29,7 @@ vi.mock("electron", () => ({
 
 // Mock settings (used by scheduler/index.ts transitively)
 vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi
-    .fn()
-    .mockReturnValue({
+  getSettings: vi.fn().mockReturnValue({
     schemaVersion: 3,
     openBeforeMinutes: 1,
     launchAtLogin: false,
@@ -44,23 +49,88 @@ vi.mock("../../src/main/facades/settings.js", () => ({
 const { preventSleep, allowSleep } = await import("../../src/main/system/power.js");
 const { resolveActiveTitleEvent, startInMeetingCountdown } =
   await import("../../src/main/scheduler/countdown.js");
-const { scheduleTitleCountdown, cancelTitleCountdown, TITLE_BEFORE_MS } =
-  await import("../../src/main/scheduler/title-countdown.js");
-const { state, resetState } =
-  await import("../../src/main/scheduler/state/index.js");
-const { initPowerCallbacks } =
-  await import("../../src/main/scheduler/facade.js");
+const {
+  scheduleTitleCountdown: scheduleTitleCountdownImpl,
+  cancelTitleCountdown: cancelTitleCountdownImpl,
+  TITLE_BEFORE_MS,
+} = await import("../../src/main/scheduler/title-countdown.js");
+
+type TestSchedulerState = Omit<
+  SchedulerState,
+  | "titleTimers"
+  | "countdownIntervals"
+  | "clearTimers"
+  | "scheduledEventData"
+  | "cancelledEvents"
+  | "activeTitleEventId"
+> & {
+  titleTimers: Map<string, ReturnType<typeof setTimeout>>;
+  countdownIntervals: Map<string, ReturnType<typeof setInterval>>;
+  clearTimers: Map<string, ReturnType<typeof setTimeout>>;
+  scheduledEventData: Map<
+    string,
+    Omit<ScheduledEventSnapshot, "meetUrl" | "openAtMs"> & {
+      meetUrl: string | undefined;
+      openAtMs?: number;
+    }
+  >;
+  cancelledEvents: Set<string>;
+  activeTitleEventId: string | null;
+};
+
+let runtime: SchedulerRuntime;
+let state: TestSchedulerState;
+
+beforeEach(() => {
+  runtime = schedulerTestContext().runtime;
+  state = runtime.state.As<TestSchedulerState>();
+});
+
+function scheduleTitleCountdown(
+  params: TitleCountdownParams,
+  titleTimers: Map<string, ReturnType<typeof setTimeout>>,
+  countdownIntervals: Map<string, ReturnType<typeof setInterval>>,
+  clearTimers: Map<string, ReturnType<typeof setTimeout>>,
+): void {
+  scheduleTitleCountdownImpl(
+    runtime,
+    params,
+    titleTimers.As<SchedulerState["titleTimers"]>(),
+    countdownIntervals.As<SchedulerState["countdownIntervals"]>(),
+    clearTimers.As<SchedulerState["clearTimers"]>(),
+  );
+}
+
+function cancelTitleCountdown(
+  eventId: string,
+  titleTimers: Map<string, ReturnType<typeof setTimeout>>,
+  countdownIntervals: Map<string, ReturnType<typeof setInterval>>,
+  clearTimers: Map<string, ReturnType<typeof setTimeout>>,
+): void {
+  cancelTitleCountdownImpl(
+    runtime,
+    asTestEventId(eventId),
+    titleTimers.As<SchedulerState["titleTimers"]>(),
+    countdownIntervals.As<SchedulerState["countdownIntervals"]>(),
+    clearTimers.As<SchedulerState["clearTimers"]>(),
+  );
+}
+
+function initPowerCallbacks(callbacks: SchedulerState["powerCallbacks"]): void {
+  state.powerCallbacks = callbacks;
+}
 
 function makeParams(
-  overrides: Partial<TitleCountdownParams> = {},
+  overrides: Partial<Omit<TitleCountdownParams, "eventId">> & { readonly eventId?: string } = {},
 ): TitleCountdownParams {
+  const { eventId = "evt-1", ...rest } = overrides;
   return {
-    eventId: "evt-1",
+    eventId: asTestEventId(eventId),
     eventTitle: "Standup",
     startMs: Date.now() + 10 * 60 * 1000, // 10 min from now
     endMs: Date.now() + 40 * 60 * 1000,
     now: Date.now(),
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -71,9 +141,9 @@ describe("scheduleTitleCountdown", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    titleTimers = new Map();
-    countdownIntervals = new Map();
-    clearTimers = new Map();
+    titleTimers = state.titleTimers;
+    countdownIntervals = state.countdownIntervals;
+    clearTimers = state.clearTimers;
     vi.mocked(preventSleep).mockClear();
     vi.mocked(allowSleep).mockClear();
     vi.mocked(resolveActiveTitleEvent).mockClear();
@@ -87,7 +157,11 @@ describe("scheduleTitleCountdown", () => {
     });
     state.onTrayTitleUpdate = vi.fn();
     state.activeTitleEventId = null;
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep, allowSleep });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep,
+      allowSleep,
+    });
   });
 
   afterEach(() => {
@@ -121,12 +195,7 @@ describe("scheduleTitleCountdown", () => {
       endMs: params.endMs,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     expect(titleTimers.has("evt-1")).toBe(true);
     // No immediate countdown
@@ -140,12 +209,7 @@ describe("scheduleTitleCountdown", () => {
       now,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     // No titleTimer (starts immediately)
     expect(titleTimers.has("evt-1")).toBe(false);
@@ -166,12 +230,7 @@ describe("scheduleTitleCountdown", () => {
       now,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     expect(titleTimers.has("evt-1")).toBe(false);
     expect(countdownIntervals.has("evt-1")).toBe(false);
@@ -189,12 +248,7 @@ describe("scheduleTitleCountdown", () => {
       endMs: params.endMs,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     expect(titleTimers.has("evt-1")).toBe(true);
     expect(countdownIntervals.has("evt-1")).toBe(false);
@@ -213,22 +267,12 @@ describe("scheduleTitleCountdown", () => {
     const now = Date.now();
     const params = makeParams({ now });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     const firstInterval = countdownIntervals.get("evt-1");
     const firstClear = clearTimers.get("evt-1");
 
     // Reschedule
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     const secondInterval = countdownIntervals.get("evt-1");
     const secondClear = clearTimers.get("evt-1");
 
@@ -251,12 +295,7 @@ describe("scheduleTitleCountdown", () => {
       endMs,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     expect(countdownIntervals.has("evt-1")).toBe(true);
 
@@ -270,7 +309,8 @@ describe("scheduleTitleCountdown", () => {
     expect(allowSleep).toHaveBeenCalled();
     // in-meeting countdown should start
     expect(startInMeetingCountdown).toHaveBeenCalledWith(
-      "evt-1",
+      runtime,
+      asTestEventId("evt-1"),
       expect.objectContaining({ title: "Standup" }),
     );
   });
@@ -280,12 +320,7 @@ describe("scheduleTitleCountdown", () => {
     const startMs = now + 5 * 60 * 1000;
     const params = makeParams({ startMs, now });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     vi.mocked(resolveActiveTitleEvent).mockClear();
 
     // Remove event data before clear timer fires
@@ -303,28 +338,17 @@ describe("scheduleTitleCountdown", () => {
     const params = makeParams({ startMs, now });
     state.activeTitleEventId = "evt-1";
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     // Initial tick should have fired
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "Standup",
-      expect.any(Number),
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("Standup", expect.any(Number));
 
     vi.mocked(state.onTrayTitleUpdate!).mockClear();
 
     // Advance 1 minute — per-minute tick
     vi.advanceTimersByTime(60_000);
 
-    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith(
-      "Standup",
-      expect.any(Number),
-    );
+    expect(state.onTrayTitleUpdate).toHaveBeenCalledWith("Standup", expect.any(Number));
   });
 
   it("per-minute tick is suppressed when event does not own the title", () => {
@@ -332,12 +356,7 @@ describe("scheduleTitleCountdown", () => {
     const params = makeParams({ now });
     state.activeTitleEventId = "other-event"; // someone else owns the title
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     vi.mocked(state.onTrayTitleUpdate!).mockClear();
 
     vi.advanceTimersByTime(60_000);
@@ -351,12 +370,7 @@ describe("scheduleTitleCountdown", () => {
     const startMs = now + 35 * 60 * 1000; // future title timer
     const params = makeParams({ startMs, now });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     expect(titleTimers.has("evt-1")).toBe(true);
 
     // Remove event data before title timer fires
@@ -380,12 +394,7 @@ describe("scheduleTitleCountdown", () => {
       endMs: params.endMs,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     // Simulate this event owning the title
     state.activeTitleEventId = "evt-1";
@@ -405,9 +414,9 @@ describe("cancelTitleCountdown", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    titleTimers = new Map();
-    countdownIntervals = new Map();
-    clearTimers = new Map();
+    titleTimers = state.titleTimers;
+    countdownIntervals = state.countdownIntervals;
+    clearTimers = state.clearTimers;
     vi.mocked(preventSleep).mockClear();
     vi.mocked(allowSleep).mockClear();
     vi.mocked(resolveActiveTitleEvent).mockClear();
@@ -419,7 +428,11 @@ describe("cancelTitleCountdown", () => {
       endMs: Date.now() + 40 * 60 * 1000,
     });
     state.onTrayTitleUpdate = vi.fn();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep, allowSleep });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep,
+      allowSleep,
+    });
   });
 
   afterEach(() => {
@@ -465,12 +478,7 @@ describe("cancelTitleCountdown", () => {
 
   it("clears all three timer types when all present", () => {
     const params = makeParams();
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     expect(countdownIntervals.has("evt-1")).toBe(true);
     expect(clearTimers.has("evt-1")).toBe(true);
@@ -484,12 +492,7 @@ describe("cancelTitleCountdown", () => {
 
   it("is safe to call with non-existent eventId (no-op)", () => {
     expect(() =>
-      cancelTitleCountdown(
-        "nonexistent",
-        titleTimers,
-        countdownIntervals,
-        clearTimers,
-      ),
+      cancelTitleCountdown("nonexistent", titleTimers, countdownIntervals, clearTimers),
     ).not.toThrow();
     expect(titleTimers.size).toBe(0);
     expect(countdownIntervals.size).toBe(0);
@@ -498,12 +501,7 @@ describe("cancelTitleCountdown", () => {
 
   it("prevents countdown tick from firing after cancellation", () => {
     const params = makeParams();
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     cancelTitleCountdown("evt-1", titleTimers, countdownIntervals, clearTimers);
     vi.mocked(state.onTrayTitleUpdate!).mockClear();
@@ -523,9 +521,9 @@ describe("cancelledEvents tracking", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    titleTimers = new Map();
-    countdownIntervals = new Map();
-    clearTimers = new Map();
+    titleTimers = state.titleTimers;
+    countdownIntervals = state.countdownIntervals;
+    clearTimers = state.clearTimers;
     vi.mocked(preventSleep).mockClear();
     vi.mocked(allowSleep).mockClear();
     vi.mocked(resolveActiveTitleEvent).mockClear();
@@ -563,12 +561,7 @@ describe("cancelledEvents tracking", () => {
 
   it("cancelTitleCountdown adds eventId to state.cancelledEvents when an active countdown exists", () => {
     const params = makeParams();
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     expect(countdownIntervals.has("evt-1")).toBe(true);
     expect(state.cancelledEvents.has("evt-1")).toBe(false);
 
@@ -587,12 +580,7 @@ describe("cancelledEvents tracking", () => {
       startMs: params.startMs,
       endMs: params.endMs,
     });
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     expect(titleTimers.has("evt-1")).toBe(true);
     expect(countdownIntervals.has("evt-1")).toBe(false);
 
@@ -612,12 +600,7 @@ describe("cancelledEvents tracking", () => {
       endMs: params.endMs,
     });
 
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
     expect(countdownIntervals.has("evt-1")).toBe(true);
 
     // Cancel countdown — adds to cancelledEvents and clears the interval
@@ -647,19 +630,13 @@ describe("cancelledEvents tracking", () => {
     });
 
     // Within 30-min window → startCountdown runs immediately
-    scheduleTitleCountdown(
-      params,
-      titleTimers,
-      countdownIntervals,
-      clearTimers,
-    );
+    scheduleTitleCountdown(params, titleTimers, countdownIntervals, clearTimers);
 
     // startCountdown should have removed the stale marker
     expect(state.cancelledEvents.has("evt-1")).toBe(false);
     expect(countdownIntervals.has("evt-1")).toBe(true);
   });
-
-  });
+});
 
 describe("multiple events scheduled simultaneously", () => {
   let titleTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -668,9 +645,9 @@ describe("multiple events scheduled simultaneously", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    titleTimers = new Map();
-    countdownIntervals = new Map();
-    clearTimers = new Map();
+    titleTimers = state.titleTimers;
+    countdownIntervals = state.countdownIntervals;
+    clearTimers = state.clearTimers;
     vi.mocked(preventSleep).mockClear();
     vi.mocked(allowSleep).mockClear();
     vi.mocked(resolveActiveTitleEvent).mockClear();
@@ -704,13 +681,13 @@ describe("multiple events scheduled simultaneously", () => {
     const now = Date.now();
 
     // Event A: within 30-min window → immediate countdown
-    const paramsA: TitleCountdownParams = {
+    const paramsA = makeParams({
       eventId: "evt-A",
       eventTitle: "Meeting A",
       startMs: now + 10 * 60 * 1000,
       endMs: now + 40 * 60 * 1000,
       now,
-    };
+    });
     state.scheduledEventData.set("evt-A", {
       title: "Meeting A",
       meetUrl: undefined,
@@ -719,13 +696,13 @@ describe("multiple events scheduled simultaneously", () => {
     });
 
     // Event B: >30 min out → titleTimer only
-    const paramsB: TitleCountdownParams = {
+    const paramsB = makeParams({
       eventId: "evt-B",
       eventTitle: "Meeting B",
       startMs: now + 45 * 60 * 1000,
       endMs: now + 75 * 60 * 1000,
       now,
-    };
+    });
     state.scheduledEventData.set("evt-B", {
       title: "Meeting B",
       meetUrl: undefined,
@@ -748,13 +725,13 @@ describe("multiple events scheduled simultaneously", () => {
   it("cancelling one event leaves the other event's timers intact", () => {
     const now = Date.now();
 
-    const paramsA: TitleCountdownParams = {
+    const paramsA = makeParams({
       eventId: "evt-A",
       eventTitle: "Meeting A",
       startMs: now + 10 * 60 * 1000,
       endMs: now + 40 * 60 * 1000,
       now,
-    };
+    });
     state.scheduledEventData.set("evt-A", {
       title: "Meeting A",
       meetUrl: undefined,
@@ -762,13 +739,13 @@ describe("multiple events scheduled simultaneously", () => {
       endMs: paramsA.endMs,
     });
 
-    const paramsB: TitleCountdownParams = {
+    const paramsB = makeParams({
       eventId: "evt-B",
       eventTitle: "Meeting B",
       startMs: now + 15 * 60 * 1000,
       endMs: now + 45 * 60 * 1000,
       now,
-    };
+    });
     state.scheduledEventData.set("evt-B", {
       title: "Meeting B",
       meetUrl: undefined,
@@ -793,26 +770,16 @@ describe("multiple events scheduled simultaneously", () => {
   });
 });
 
-// NOTE: This describe must run LAST. resetState() swaps the module-level `state`
-// singleton binding, which can cause subsequent tests that destructured `state`
-// at file load time to operate on a stale reference.
-describe("resetState (must run last)", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("resetState clears state.cancelledEvents", async () => {
+describe("fresh scheduler state", () => {
+  it("does not carry cancelledEvents into a new instance", () => {
     state.cancelledEvents.add("evt-1");
     state.cancelledEvents.add("evt-2");
     expect(state.cancelledEvents.size).toBe(2);
 
-    resetState();
+    const fresh = createSchedulerState();
 
-    // After resetState the module-level `state` binding is replaced. Re-import
-    // to obtain the fresh reference and verify the new state has an empty set.
-    const stateModule = await import("../../src/main/scheduler/state/index.js");
-    expect(stateModule.state.cancelledEvents.size).toBe(0);
-    expect(stateModule.state.cancelledEvents.has("evt-1")).toBe(false);
-    expect(stateModule.state.cancelledEvents.has("evt-2")).toBe(false);
+    expect(fresh.cancelledEvents.size).toBe(0);
+    expect(fresh.cancelledEvents.has(asTestEventId("evt-1"))).toBe(false);
+    expect(fresh.cancelledEvents.has(asTestEventId("evt-2"))).toBe(false);
   });
 });

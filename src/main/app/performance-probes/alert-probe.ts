@@ -9,6 +9,8 @@ import { showAlert, destroyAlertWindow } from "../../windows/alert-window.js";
 import { flushPerfTraceToUserData } from "../../utils/performance-trace-file.js";
 import { isPerfTraceEnabled, perfTrace } from "../../utils/performance-trace.js";
 
+const onSyntheticAlertDismiss = (): void => undefined;
+
 function syntheticMeeting(seed: number): MeetingEvent {
   const now = Date.now();
   const start = new Date(now + 60_000).toISOString();
@@ -47,7 +49,7 @@ export async function runAlertProbe(userDataPath: string): Promise<void> {
   // Hide/reuse sequence
   for (let i = 0; i < functional; i++) {
     const t0 = performance.now();
-    showAlert(syntheticMeeting(i));
+    showAlert(syntheticMeeting(i), onSyntheticAlertDismiss);
     await settle();
     // User-dismiss path via force hide: destroy only for baseline sequence.
     // Functional path uses generation-safe hide via destroy only at end of block.
@@ -67,7 +69,7 @@ export async function runAlertProbe(userDataPath: string): Promise<void> {
   // Destroy-between-cycles baseline (measurement only — not a product path)
   for (let i = 0; i < measured; i++) {
     const t0 = performance.now();
-    showAlert(syntheticMeeting(1000 + i));
+    showAlert(syntheticMeeting(1000 + i), onSyntheticAlertDismiss);
     await settle();
     destroyAlertWindow();
     await settle();

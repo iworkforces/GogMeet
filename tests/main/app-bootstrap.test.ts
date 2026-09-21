@@ -24,33 +24,27 @@ describe("main/index.ts", () => {
   });
 
   it("source file exists at expected path", async () => {
-    await expect(
-      fs.stat(path.join(root, "src/main/index.ts")),
-    ).resolves.toBeDefined();
+    await expect(fs.stat(path.join(root, "src/main/index.ts"))).resolves.toBeDefined();
   });
 
   it("imports from all expected modules", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     // index.ts delegates to lifecycle.ts for subsystem initialization
     expect(content).toContain('from "./app/lifecycle.js"');
     expect(content).toContain('from "./utils/packageInfo.js"');
   });
 
-  it("lifecycle.ts imports from all subsystem modules", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/app/lifecycle.ts"),
-      "utf-8",
-    );
+  it("lifecycle.ts routes graph-owned subsystems through AppGraph", async () => {
+    const content = await fs.readFile(path.join(root, "src/main/app/lifecycle.ts"), "utf-8");
 
     expect(content).toContain('from "../tray.js"');
     expect(content).toContain('from "./ipc.js"');
-    expect(content).toContain('from "../scheduler/facade.js"');
     expect(content).toContain('from "../composition/app-graph.js"');
     expect(content).toContain("createAppGraph");
+    expect(content).toContain("graph.scheduler.republishUiForDisplayTick");
+    expect(content).not.toContain('from "../scheduler/facade.js"');
+    expect(content).not.toContain('from "../facades/calendar-watcher.js"');
     expect(content).toContain('from "../system/auto-launch.js"');
     expect(content).toContain('from "../system/notification.js"');
     expect(content).toContain('from "../system/shortcuts.js"');
@@ -70,19 +64,13 @@ describe("main/index.ts", () => {
   });
 
   it("exports createWindow function signature", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     expect(content).toMatch(/function createWindow/);
   });
 
   it("registers app lifecycle events", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     expect(content).toContain("app.whenReady()");
     expect(content).toContain('"window-all-closed"');
@@ -90,30 +78,21 @@ describe("main/index.ts", () => {
   });
 
   it("requests a single-instance lock before boot", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     expect(content).toContain("requestSingleInstanceLock");
     expect(content).toContain('"second-instance"');
   });
 
   it("uses platform window chrome for the popover", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     expect(content).toContain('from "./utils/window-chrome.js"');
     expect(content).toContain('platformWindowChrome("popover")');
   });
 
   it("uses correct window configuration", async () => {
-    const content = await fs.readFile(
-      path.join(root, "src/main/index.ts"),
-      "utf-8",
-    );
+    const content = await fs.readFile(path.join(root, "src/main/index.ts"), "utf-8");
 
     expect(content).toContain("SECURE_WEB_PREFERENCES");
     expect(content).toContain("getPreloadPath()");

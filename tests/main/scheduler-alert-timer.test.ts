@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { EventId } from "../../src/domain/entities/brand.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
 import { asTestEventId, createMockEvent } from "../helpers/test-utils.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 vi.mock("../../src/main/windows/alert-window.js", () => ({
   showAlert: vi.fn(),
@@ -18,11 +20,13 @@ function makeEvent(overrides: Partial<MeetingEvent> = {}): MeetingEvent {
 describe("scheduleAlertTimer", () => {
   let alertTimers: Map<EventId, ReturnType<typeof setTimeout>>;
   let alertFiredEvents: Map<EventId, number>;
+  let runtime: SchedulerRuntime;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    alertTimers = new Map();
-    alertFiredEvents = new Map();
+    runtime = schedulerTestContext().runtime;
+    alertTimers = runtime.state.alertTimers;
+    alertFiredEvents = runtime.state.alertFiredEvents;
     vi.mocked(showAlert).mockReset();
   });
 
@@ -34,7 +38,7 @@ describe("scheduleAlertTimer", () => {
 
   it("creates a timer and stores it in alertTimers map", () => {
     const event = makeEvent();
-    scheduleAlertTimer(event, 120_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
 
     expect(alertTimers.has(event.id)).toBe(true);
   });
@@ -42,7 +46,7 @@ describe("scheduleAlertTimer", () => {
   it("adds event to alertFiredEvents when timer fires", () => {
     const event = makeEvent();
     const delay = 120_000;
-    scheduleAlertTimer(event, delay, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     vi.advanceTimersByTime(delay); // alertDelay = 120000 - 60000 = 60000
     expect(alertFiredEvents.has(event.id)).toBe(true);
@@ -51,19 +55,19 @@ describe("scheduleAlertTimer", () => {
   it("calls showAlert(event) when timer fires", () => {
     const event = makeEvent();
     const delay = 120_000;
-    scheduleAlertTimer(event, delay, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     vi.advanceTimersByTime(delay);
-    expect(showAlert).toHaveBeenCalledWith(event, undefined);
+    expect(showAlert).toHaveBeenCalledWith(event, expect.any(Function), undefined);
   });
 
   it("calls showAlert for events without meetUrl", () => {
     const event = makeEvent({ meetUrl: undefined });
     const delay = 120_000;
-    scheduleAlertTimer(event, delay, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     vi.advanceTimersByTime(delay);
-    expect(showAlert).toHaveBeenCalledWith(event, undefined);
+    expect(showAlert).toHaveBeenCalledWith(event, expect.any(Function), undefined);
     expect(event.meetUrl).toBeUndefined();
   });
 
@@ -74,7 +78,7 @@ describe("scheduleAlertTimer", () => {
 
     const event = makeEvent();
     const delay = 120_000;
-    scheduleAlertTimer(event, delay, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     // Should not throw
     expect(() => vi.advanceTimersByTime(delay)).not.toThrow();
@@ -83,11 +87,11 @@ describe("scheduleAlertTimer", () => {
 
   it("cancels existing timer before scheduling new one (idempotent)", () => {
     const event = makeEvent();
-    scheduleAlertTimer(event, 120_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
-    const firstHandle = alertTimers.get("evt-1");
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
+    const firstHandle = alertTimers.get(event.id);
 
-    scheduleAlertTimer(event, 180_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
-    const secondHandle = alertTimers.get("evt-1");
+    scheduleAlertTimer(runtime, event, 180_000, Date.now() + 30 * 60_000);
+    const secondHandle = alertTimers.get(event.id);
 
     expect(secondHandle).not.toBe(firstHandle);
     expect(alertTimers.size).toBe(1);
@@ -106,7 +110,7 @@ describe("scheduleAlertTimer", () => {
     const effectiveDelay = 90_000;
     const expectedAlertDelay = effectiveDelay - ALERT_OFFSET_MS; // 30000
 
-    scheduleAlertTimer(event, effectiveDelay, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, effectiveDelay, Date.now() + 30 * 60_000);
 
     // Should NOT have fired yet at 29999ms
     vi.advanceTimersByTime(expectedAlertDelay - 1);
@@ -120,7 +124,7 @@ describe("scheduleAlertTimer", () => {
   it("uses Math.max(0, ...) for delay (no negative delays)", () => {
     const event = makeEvent();
     // effectiveDelay < ALERT_OFFSET_MS → delay should be 0
-    scheduleAlertTimer(event, 30_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, 30_000, Date.now() + 30 * 60_000);
 
     // Should fire immediately (delay 0)
     vi.advanceTimersByTime(0);
@@ -129,7 +133,7 @@ describe("scheduleAlertTimer", () => {
 
   it("removes timer from map when timer fires", () => {
     const event = makeEvent();
-    scheduleAlertTimer(event, 120_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
     expect(alertTimers.has(event.id)).toBe(true);
 
     vi.advanceTimersByTime(60_000); // 120000 - 60000 = 60000
@@ -139,10 +143,12 @@ describe("scheduleAlertTimer", () => {
 
 describe("cancelAlertTimer", () => {
   let alertTimers: Map<EventId, ReturnType<typeof setTimeout>>;
+  let runtime: SchedulerRuntime;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    alertTimers = new Map();
+    runtime = schedulerTestContext().runtime;
+    alertTimers = runtime.state.alertTimers;
     vi.mocked(showAlert).mockReset();
   });
 
@@ -153,9 +159,8 @@ describe("cancelAlertTimer", () => {
   });
 
   it("clears timer and removes from map", () => {
-    const alertFiredEvents = new Map<EventId, number>();
     const event = makeEvent();
-    scheduleAlertTimer(event, 120_000, Date.now() + 30 * 60_000, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
     expect(alertTimers.has(event.id)).toBe(true);
 
     cancelAlertTimer(event.id, alertTimers);
@@ -175,12 +180,14 @@ describe("cancelAlertTimer", () => {
 describe("scheduleAlertTimer TTL suppression", () => {
   let alertTimers: Map<EventId, ReturnType<typeof setTimeout>>;
   let alertFiredEvents: Map<EventId, number>;
+  let runtime: SchedulerRuntime;
   const FIFTEEN_MIN_MS = 15 * 60 * 1000;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    alertTimers = new Map();
-    alertFiredEvents = new Map();
+    runtime = schedulerTestContext().runtime;
+    alertTimers = runtime.state.alertTimers;
+    alertFiredEvents = runtime.state.alertFiredEvents;
     vi.mocked(showAlert).mockReset();
   });
 
@@ -193,7 +200,7 @@ describe("scheduleAlertTimer TTL suppression", () => {
   it("records expiry as endMs + 15min when timer fires", () => {
     const event = makeEvent();
     const endMs = Date.now() + 30 * 60_000;
-    scheduleAlertTimer(event, 120_000, endMs, alertTimers, alertFiredEvents);
+    scheduleAlertTimer(runtime, event, 120_000, endMs);
     vi.advanceTimersByTime(60_000);
     expect(alertFiredEvents.get(event.id)).toBe(endMs + FIFTEEN_MIN_MS);
   });

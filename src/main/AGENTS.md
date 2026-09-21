@@ -4,29 +4,29 @@ Electron main owns lifecycle, tray and menu, BrowserWindows, system APIs, typed 
 
 ## Files and subsystems
 
-| Area              | Files                                                                       | Responsibility                                                                                                      |
-| ----------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Root              | `index.ts`, `tray.ts`, `events.ts`, `googlemeet-events.swift`               | Single-instance bootstrap, production tray, main bus, and primary Darwin Swift source                               |
-| `app/`            | `lifecycle.ts`, `ipc.ts`, `performance-probe*`                              | Lifecycle, IPC registration, and private packaged measurement probes                                                |
-| `composition/`    | `app-graph.ts`, `bind-composition.ts`, `create-test-app-graph.ts`           | Production graph construction and facade default binding                                                            |
-| `application/`    | `ports/`, `use-cases/`                                                      | Port contracts and use-case projections with no Electron, Node I/O, or Swift                                        |
-| `infrastructure/` | `settings/`, `electron/`                                                    | `JsonSettingsStore` and `ShellMeetingOpener` only                                                                   |
-| `facades/`        | calendar, watcher, status, settings                                         | Main-process application surface, UI snapshot publication, and default binds                                        |
-| `calendar/`       | factory, providers, `google-http`, auth, offline cache, refresh coordinator | Provider implementation, OAuth, Google transport and sync, offline cache, coordinated refreshes, and probe provider |
-| `platform/`       | `os.ts`                                                                     | `isDarwin` and `isWin32`                                                                                            |
-| `windows/`        | about, update, alert, settings                                              | BrowserWindow ownership, including hide and reuse for alert and settings windows                                    |
-| `system/`         | power, display horizon, shortcuts, auto-launch, auto-updater, notification  | OS integration and wall-clock display refreshes                                                                     |
-| `scheduler/`      | facade, core, adapters, timers                                              | Polling, schedule planning, automatic joins, alerts, and timer state                                                |
-| `swift/`          | helper process, binary manager/cache/compiler, parser, sidecar, occurrence identity | EventKit helper (dual Swift sources), reachable only from the Darwin provider                                |
-| `ipc-handlers/`   | per-domain handlers                                                         | Typed IPC handlers that receive `AppGraph`                                                                          |
-| `menu/`           | `meeting-menu.ts`                                                           | Tray menu templates, including limited, offline, and completed-today rows                                           |
-| `utils/`          | window helpers, join hub, URL helpers, logging, performance trace           | Main-process helpers and egress support                                                                             |
+| Area              | Files                                                                               | Responsibility                                                                                                      |
+| ----------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Root              | `index.ts`, `tray.ts`, `events.ts`, `googlemeet-events.swift`                       | Single-instance bootstrap, production tray, main bus, and primary Darwin Swift source                               |
+| `app/`            | `lifecycle.ts`, `ipc.ts`, `performance-probe*`                                      | Lifecycle, IPC registration, and private packaged measurement probes                                                |
+| `composition/`    | `app-graph.ts`, `create-test-app-graph.ts`                                          | Production graph construction and test graph delegation                                                             |
+| `application/`    | `ports/`, `use-cases/`                                                              | Port contracts and use-case projections with no Electron, Node I/O, or Swift                                        |
+| `infrastructure/` | `settings/`, `electron/`                                                            | `JsonSettingsStore` and `ShellMeetingOpener` only                                                                   |
+| `facades/`        | calendar, watcher, status, settings                                                 | Main-process instance factories and UI snapshot publication                                                         |
+| `calendar/`       | factory, providers, `google-http`, auth, offline cache, refresh coordinator         | Provider implementation, OAuth, Google transport and sync, offline cache, coordinated refreshes, and probe provider |
+| `platform/`       | `os.ts`                                                                             | `isDarwin` and `isWin32`                                                                                            |
+| `windows/`        | about, update, alert, settings                                                      | BrowserWindow ownership, including hide and reuse for alert and settings windows                                    |
+| `system/`         | power, display horizon, shortcuts, auto-launch, auto-updater, notification          | OS integration and wall-clock display refreshes                                                                     |
+| `scheduler/`      | facade, core, adapters, timers                                                      | Polling, schedule planning, automatic joins, alerts, and timer state                                                |
+| `swift/`          | helper process, binary manager/cache/compiler, parser, sidecar, occurrence identity | EventKit helper (dual Swift sources), reachable only from the Darwin provider                                       |
+| `ipc-handlers/`   | per-domain handlers                                                                 | Typed IPC handlers that receive `AppGraph`                                                                          |
+| `menu/`           | `meeting-menu.ts`                                                                   | Tray menu templates, including limited, offline, and completed-today rows                                           |
+| `utils/`          | window helpers, logging, performance trace, system settings                         | Main-process utilities                                                                                              |
 
 ## Lifecycle order
 
 `initializeApp(win)` creates and stores `AppGraph` before IPC, warms the calendar provider in the background, loads settings and permission status, installs the tray, wires scheduler callbacks and display-horizon refreshes, then starts scheduler and watcher. Power, shortcuts, notifications, auto-launch, and the packaged non-portable updater follow. Darwin may request not-determined calendar permission. Windows OAuth starts only from tray or Settings.
 
-`shutdownApp()` cleans up power and display-horizon listeners, destroys cached windows, stops scheduler and watcher, unregisters shortcuts, and clears the active graph. Resume and unlock invalidate calendar permission cache, revive the watcher, and restart the scheduler.
+`shutdownApp()` cleans up power and display-horizon listeners, destroys cached windows, stops scheduler and watcher, unregisters shortcuts, and clears the active graph. Resume and unlock invalidate the calendar permission cache, revive the watcher, and request `graph.scheduler.forcePoll({ reason: "power" })`.
 
 ## Calendar publication and automation
 
@@ -40,7 +40,7 @@ Electron main owns lifecycle, tray and menu, BrowserWindows, system APIs, typed 
 ## Architecture rules
 
 - `events.ts` decouples scheduler, power, calendar UI, and tray through `meeting-list-updated`, `calendar-status-updated`, and `power-state-changed`.
-- Prefer `AppGraph` for lifecycle, IPC, tray, and shortcuts. Keep free functions for internal adapters, test default binding, and display-horizon republish.
+- `AppGraph` owns lifecycle, IPC, tray, and shortcut dependencies. Its factory creates graph-local calendar, settings, scheduler, join, watcher, and one opener; it finalizes overrides before downstream closures use them.
 - Outside `scheduler/`, import only `scheduler/facade.ts` or use `graph.scheduler`.
 - `swift/` may be imported only by `calendar/providers/darwin-eventkit.ts` and `swift/**`. Facades must not import `swift/*` or `calendar/auth/*`.
 - Calendar ports require `AbortSignal`. `showCompletedTodayMeetings` is display-only and does not restart the scheduler.
@@ -49,7 +49,7 @@ Electron main owns lifecycle, tray and menu, BrowserWindows, system APIs, typed 
 ## IPC, security, and tray
 
 - Use `typedHandle` and `typedSend`, and validate senders for renderer-originated IPC.
-- Meeting egress goes through the allowlisted `ShellMeetingOpener`, `openMeetingUrl`, and `joinMeetingById` or `graph.join.byId`.
+- Meeting egress goes through the allowlisted `ShellMeetingOpener`, exposed as `graph.opener`. Explicit joins use `graph.join.byId`.
 - Renderers stay sandboxed and context-isolated with no Node integration.
 - Install the tray context menu before activation. Bus-driven rebuilds are microtask-coalesced; display-horizon ticks and the completed-history setting force an immediate rebuild.
 - A user tray refresh bypasses the 10-second auto, watch, and power coalesce. macOS clicks use a soft refresh; Windows also rebuilds from cache before opening its context menu.

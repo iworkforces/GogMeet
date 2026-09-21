@@ -1,7 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { CalendarResult } from "../../src/domain/entities/calendar-result.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
-import { createMockEvent, asTestEventId, asTestIsoUtc, asTestMeetUrl, isoFromNow } from "../helpers/test-utils.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import type { SchedulerFacade } from "../../src/main/scheduler/facade.js";
+import type { SchedulerTestContext } from "../helpers/scheduler-runtime.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
+import {
+  createMockEvent,
+  asTestEventId,
+  asTestIsoUtc,
+  asTestMeetUrl,
+  isoFromNow,
+} from "../helpers/test-utils.js";
 
 // Mock electron
 vi.mock("electron", () => ({
@@ -11,16 +21,6 @@ vi.mock("electron", () => ({
   },
 }));
 
-// Mock calendar module
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  reportCalendarPollError: vi.fn(),
-  refreshCalendarPublication: vi.fn().mockResolvedValue({
-    publicationGeneration: 1,
-    result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] },
-  }),
-  getLastPublication: vi.fn().mockReturnValue(null),
-}));
-
 // Mock power module
 vi.mock("../../src/main/system/power.js", () => ({
   getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
@@ -28,48 +28,79 @@ vi.mock("../../src/main/system/power.js", () => ({
   allowSleep: vi.fn(),
 }));
 
-// Mock settings
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi
-    .fn()
-    .mockReturnValue({
-    schemaVersion: 3,
-    openBeforeMinutes: 1,
-    launchAtLogin: false,
-    showTomorrowMeetings: true,
-    showCompletedTodayMeetings: false,
-    windowAlert: true,
-    autoOpenEnabled: true,
-    alertLeadSeconds: 60,
-    nativeNotifications: true,
-    lateJoinGraceMinutes: 0,
-    quietHoursEnabled: false,
-    quietHoursStart: "22:00",
-    quietHoursEnd: "07:00",
-  }),
-}));
-
-const { refreshCalendarPublication } = await import("../../src/main/facades/calendar.js");
-
-// Use stateModule.state to always get the current state reference after replaceState
-const stateModule = await import("../../src/main/scheduler/state/index.js");
-const {
-  initPowerCallbacks,
-  startScheduler,
-  stopScheduler,
-  restartScheduler,
-  _resetForceTestState,
-} = await import("../../src/main/scheduler/facade.js");
+const { createSchedulerFacade } = await import("../../src/main/scheduler/facade.js");
 const { mainBus } = await import("../../src/main/events.js");
 
-const { poll, _resetForTest } = await import("../../src/main/scheduler/poll.js");
+const { poll: pollImpl, republishUiForDisplayTick: republishUiImpl } =
+  await import("../../src/main/scheduler/poll.js");
 
-// Live references to current state Maps — re-bound in each beforeEach after _resetForTest()
-const { getCountdownIntervals, getClearTimers, getInMeetingIntervals, getInMeetingEndTimers } = stateModule;
-let countdownIntervals = getCountdownIntervals();
-let clearTimers = getClearTimers();
-let inMeetingIntervals = getInMeetingIntervals();
-let inMeetingEndTimers = getInMeetingEndTimers();
+let context: SchedulerTestContext;
+let runtime: SchedulerRuntime;
+let facade: SchedulerFacade;
+let refreshCalendarPublication: SchedulerTestContext["refresh"];
+let getLastPublication: SchedulerTestContext["getLastPublication"];
+
+function createFreshFixture(): void {
+  context = schedulerTestContext();
+  runtime = context.runtime;
+  facade = createSchedulerFacade(context.dependencies, runtime);
+  refreshCalendarPublication = context.refresh;
+  getLastPublication = context.getLastPublication;
+}
+
+function resetFixture(): void {
+  createFreshFixture();
+}
+
+function initPowerCallbacks(callbacks: NonNullable<typeof runtime.state.powerCallbacks>): void {
+  runtime.state.powerCallbacks = callbacks;
+}
+
+function startScheduler(): void {
+  facade.start();
+}
+
+function stopScheduler(): void {
+  facade.stop();
+}
+
+function restartScheduler(): void {
+  facade.restart();
+}
+
+function poll(isCurrentGeneration?: () => boolean) {
+  return pollImpl(runtime, isCurrentGeneration);
+}
+
+const stateModule = {
+  get state() {
+    return runtime.state;
+  },
+  setConsecutiveErrors(value: number) {
+    runtime.state.consecutiveErrors = value;
+  },
+  getConsecutiveErrors: () => runtime.state.consecutiveErrors,
+  getTimers: () => runtime.state.timers,
+  getAlertTimers: () => runtime.state.alertTimers,
+  getCountdownIntervals: () => runtime.state.countdownIntervals,
+  setActiveInMeetingEventId: (id: typeof runtime.state.activeInMeetingEventId) => {
+    runtime.state.activeInMeetingEventId = id;
+  },
+  setActiveTitleEventId: (id: typeof runtime.state.activeTitleEventId) => {
+    runtime.state.activeTitleEventId = id;
+  },
+  getActiveTitleEventId: () => runtime.state.activeTitleEventId,
+  getActiveInMeetingEventId: () => runtime.state.activeInMeetingEventId,
+};
+
+const getCountdownIntervals = () => runtime.state.countdownIntervals;
+const getClearTimers = () => runtime.state.clearTimers;
+const getInMeetingIntervals = () => runtime.state.inMeetingIntervals;
+const getInMeetingEndTimers = () => runtime.state.inMeetingEndTimers;
+let countdownIntervals: SchedulerRuntime["state"]["countdownIntervals"];
+let clearTimers: SchedulerRuntime["state"]["clearTimers"];
+let inMeetingIntervals: SchedulerRuntime["state"]["inMeetingIntervals"];
+let inMeetingEndTimers: SchedulerRuntime["state"]["inMeetingEndTimers"];
 function refreshStateRefs(): void {
   countdownIntervals = getCountdownIntervals();
   clearTimers = getClearTimers();
@@ -100,16 +131,29 @@ const mockTrayCallback = vi.fn();
 describe("poll()", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
     stateModule.state.onTrayTitleUpdate = mockTrayCallback;
     mockTrayCallback.mockClear();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep: vi.fn(), allowSleep: vi.fn() });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep: vi.fn(),
+      allowSleep: vi.fn(),
+    });
   });
 
   afterEach(() => {
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
     stateModule.state.powerCallbacks = null;
@@ -118,7 +162,16 @@ describe("poll()", () => {
   it("resets consecutiveErrors to 0 on successful poll with events", async () => {
     stateModule.setConsecutiveErrors(2);
     const event = makeEvent();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [event],
+      },
+    });
 
     await poll();
 
@@ -127,7 +180,16 @@ describe("poll()", () => {
 
   it("resets consecutiveErrors to 0 on success with empty events", async () => {
     stateModule.setConsecutiveErrors(1);
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     await poll();
 
@@ -164,7 +226,10 @@ describe("poll()", () => {
       allowSleep,
     });
     // Seed a browser timer + countdown as if a prior complete poll armed them.
-    stateModule.state.timers.set(asTestEventId("stale"), setTimeout(() => {}, 60_000));
+    stateModule.state.timers.set(
+      asTestEventId("stale"),
+      setTimeout(() => {}, 60_000),
+    );
     stateModule.state.countdownIntervals.set(
       asTestEventId("stale"),
       setInterval(() => {}, 60_000),
@@ -202,16 +267,21 @@ describe("poll()", () => {
       source: "live",
       completeness: "partial",
     });
-    expect(stateModule.state.lastKnownEvents && stateModule.state.lastKnownEvents.kind === "ok"
-      ? stateModule.state.lastKnownEvents.events
-      : []).toHaveLength(1);
+    expect(
+      stateModule.state.lastKnownEvents && stateModule.state.lastKnownEvents.kind === "ok"
+        ? stateModule.state.lastKnownEvents.events
+        : [],
+    ).toHaveLength(1);
     expect(stateModule.state.lastKnownEvents).toMatchObject({
       darwinPartialRefreshDiagnostics: { total: 1 },
     });
   });
 
   it("offline-cache suspends automation and preserves joinable events", async () => {
-    stateModule.state.alertTimers.set(asTestEventId("a"), setTimeout(() => {}, 60_000));
+    stateModule.state.alertTimers.set(
+      asTestEventId("a"),
+      setTimeout(() => {}, 60_000),
+    );
     const event = makeEvent({
       id: asTestEventId("offline-1"),
       startDate: asTestIsoUtc(new Date(Date.now() + 10 * 60_000).toISOString()),
@@ -251,9 +321,7 @@ describe("poll()", () => {
   });
 
   it("increments consecutiveErrors on thrown exception", async () => {
-    vi.mocked(refreshCalendarPublication).mockRejectedValue(
-      new Error("Network failure"),
-    );
+    vi.mocked(refreshCalendarPublication).mockRejectedValue(new Error("Network failure"));
 
     await poll();
     expect(stateModule.getConsecutiveErrors()).toBe(1);
@@ -362,8 +430,9 @@ describe("poll()", () => {
     await poll(); // already past threshold — must NOT re-fire
     await poll();
 
-    const thresholdLogs = errSpy.mock.calls.filter(([msg]) =>
-      typeof msg === "string" && msg.includes("consecutive errors \u2014 cleared tray title"),
+    const thresholdLogs = errSpy.mock.calls.filter(
+      ([msg]) =>
+        typeof msg === "string" && msg.includes("consecutive errors \u2014 cleared tray title"),
     );
     expect(thresholdLogs).toHaveLength(1);
     errSpy.mockRestore();
@@ -423,18 +492,42 @@ describe("poll()", () => {
       webContents: { send: mockSend, isDestroyed: vi.fn().mockReturnValue(false) },
     } as never;
 
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     await poll();
     // IPC now sends events array (empty in this case) instead of undefined
-    expect(mockSend).toHaveBeenCalledWith("calendar:result-updated", expect.objectContaining({ publicationGeneration: expect.any(Number), result: expect.objectContaining({ kind: "ok" }) }));
+    expect(mockSend).toHaveBeenCalledWith(
+      "calendar:result-updated",
+      expect.objectContaining({
+        publicationGeneration: expect.any(Number),
+        result: expect.objectContaining({ kind: "ok" }),
+      }),
+    );
 
     stateModule.state.win = null;
   });
 
   it("does NOT send IPC when window is null", async () => {
     stateModule.state.win = null;
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     // Should not throw
     await expect(poll()).resolves.toMatchObject({ publicationGeneration: expect.any(Number) });
@@ -447,7 +540,16 @@ describe("poll()", () => {
       webContents: { send: mockSend },
     } as never;
 
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
 
     await poll();
 
@@ -498,15 +600,19 @@ describe("poll()", () => {
 describe("event list signature gating (renderer push)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     stateModule.state.onTrayTitleUpdate = mockTrayCallback;
     mockTrayCallback.mockClear();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep: vi.fn(), allowSleep: vi.fn() });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep: vi.fn(),
+      allowSleep: vi.fn(),
+    });
   });
 
   afterEach(() => {
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
     stateModule.state.powerCallbacks = null;
@@ -518,7 +624,16 @@ describe("event list signature gating (renderer push)", () => {
       isDestroyed: vi.fn().mockReturnValue(false),
       webContents: { send: mockSend, isDestroyed: vi.fn().mockReturnValue(false) },
     } as never;
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events,
+      },
+    });
     await poll();
     return mockSend.mock.calls.length;
   }
@@ -613,19 +728,17 @@ describe("event list signature gating (renderer push)", () => {
 describe("republishUiForDisplayTick", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
   });
 
   afterEach(() => {
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
   });
 
   it("force-pushes last publication even when content signature is unchanged", async () => {
-    const { getLastPublication } = await import("../../src/main/facades/calendar.js");
-    const { republishUiForDisplayTick } = await import("../../src/main/scheduler/poll.js");
     const evt = createMockEvent({
       title: "Standup",
       startDate: asTestIsoUtc(isoFromNow(5)),
@@ -652,47 +765,56 @@ describe("republishUiForDisplayTick", () => {
     expect(mockSend).toHaveBeenCalledTimes(1);
     mockSend.mockClear();
     // Identical content would normally skip; force path must send.
-    republishUiForDisplayTick();
+    republishUiImpl(runtime);
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to lastKnownEvents when coordinator has no publication", async () => {
-    const { getLastPublication } = await import("../../src/main/facades/calendar.js");
-    const { republishUiForDisplayTick } = await import("../../src/main/scheduler/poll.js");
     const { calendarLiveOk } = await import("../../src/domain/entities/calendar-result.js");
     vi.mocked(getLastPublication).mockReturnValue(null);
     const events = [createMockEvent()];
     stateModule.state.lastKnownEvents = calendarLiveOk(events, "complete", Date.now());
     const listener = vi.fn();
     mainBus.on("meeting-list-updated", listener);
-    republishUiForDisplayTick();
+    republishUiImpl(runtime);
     expect(listener).toHaveBeenCalledWith(events);
     mainBus.off("meeting-list-updated", listener);
   });
 
-  it("facade re-export calls poll implementation", async () => {
-    const { getLastPublication } = await import("../../src/main/facades/calendar.js");
-    const { republishUiForDisplayTick } = await import("../../src/main/scheduler/facade.js");
+  it("facade instance calls poll implementation", () => {
     vi.mocked(getLastPublication).mockReturnValue(null);
     stateModule.state.lastKnownEvents = null;
     // No-op when nothing cached — must not throw.
-    expect(() => republishUiForDisplayTick()).not.toThrow();
+    expect(() => facade.republishUiForDisplayTick()).not.toThrow();
   });
 });
 
 describe("startScheduler", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
     stateModule.state.onTrayTitleUpdate = mockTrayCallback;
     mockTrayCallback.mockClear();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep: vi.fn(), allowSleep: vi.fn() });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep: vi.fn(),
+      allowSleep: vi.fn(),
+    });
   });
 
   afterEach(() => {
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
     stateModule.state.powerCallbacks = null;
@@ -730,16 +852,29 @@ describe("startScheduler", () => {
 describe("stopScheduler", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
     stateModule.state.onTrayTitleUpdate = mockTrayCallback;
     mockTrayCallback.mockClear();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep: vi.fn(), allowSleep: vi.fn() });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep: vi.fn(),
+      allowSleep: vi.fn(),
+    });
   });
 
   afterEach(() => {
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
     stateModule.state.powerCallbacks = null;
@@ -782,19 +917,30 @@ describe("stopScheduler", () => {
 describe("restartScheduler", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    _resetForTest();
-    _resetForceTestState();
+    resetFixture();
     refreshStateRefs();
     vi.mocked(refreshCalendarPublication).mockClear();
-    vi.mocked(refreshCalendarPublication).mockResolvedValue({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    vi.mocked(refreshCalendarPublication).mockResolvedValue({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
     stateModule.state.onTrayTitleUpdate = mockTrayCallback;
     mockTrayCallback.mockClear();
-    initPowerCallbacks({ getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000), preventSleep: vi.fn(), allowSleep: vi.fn() });
+    initPowerCallbacks({
+      getPollInterval: vi.fn().mockReturnValue(2 * 60 * 1000),
+      preventSleep: vi.fn(),
+      allowSleep: vi.fn(),
+    });
   });
 
   afterEach(() => {
-    _resetForTest();
-    _resetForceTestState();
+    resetFixture();
     refreshStateRefs();
     vi.useRealTimers();
     stateModule.state.powerCallbacks = null;
@@ -853,7 +999,16 @@ describe("restartScheduler", () => {
     startScheduler();
     await Promise.resolve();
     restartScheduler();
-    stalePoll.resolve({ publicationGeneration: 1, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [staleEvent] } });
+    stalePoll.resolve({
+      publicationGeneration: 1,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [staleEvent],
+      },
+    });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -861,7 +1016,16 @@ describe("restartScheduler", () => {
     const emittedAfterStale = [...emittedEventIds];
     const sendsAfterStale = send.mock.calls.length;
 
-    currentPoll.resolve({ publicationGeneration: 2, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [currentEvent] } });
+    currentPoll.resolve({
+      publicationGeneration: 2,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [currentEvent],
+      },
+    });
     await vi.advanceTimersByTimeAsync(0);
     mainBus.off("meeting-list-updated", onMeetingListUpdated);
     stopScheduler();
@@ -872,12 +1036,15 @@ describe("restartScheduler", () => {
     expect(refreshCalendarPublication).toHaveBeenCalledTimes(2);
     expect(emittedEventIds).toEqual([currentEvent.id]);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith("calendar:result-updated", expect.objectContaining({
-      result: expect.objectContaining({
-        kind: "ok",
-        events: [currentEvent],
+    expect(send).toHaveBeenCalledWith(
+      "calendar:result-updated",
+      expect.objectContaining({
+        result: expect.objectContaining({
+          kind: "ok",
+          events: [currentEvent],
+        }),
       }),
-    }));
+    );
   });
 
   it("ignores a pre-restart rejected poll before current-generation error state", async () => {
@@ -898,7 +1065,16 @@ describe("restartScheduler", () => {
     const errorsAfterStale = stateModule.getConsecutiveErrors();
     const logsAfterStale = errorSpy.mock.calls.length;
 
-    currentPoll.resolve({ publicationGeneration: 2, result: { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] } });
+    currentPoll.resolve({
+      publicationGeneration: 2,
+      result: {
+        kind: "ok",
+        source: "live",
+        completeness: "complete",
+        observedAt: Date.now(),
+        events: [],
+      },
+    });
     await vi.advanceTimersByTimeAsync(0);
     errorSpy.mockRestore();
     stopScheduler();
@@ -910,7 +1086,7 @@ describe("restartScheduler", () => {
   });
 });
 
-describe("_resetForTest", () => {
+describe("fresh runtime defaults", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -922,7 +1098,7 @@ describe("_resetForTest", () => {
   it("resets consecutive errors to 0", () => {
     stateModule.setConsecutiveErrors(5);
 
-    _resetForTest();
+    resetFixture();
 
     expect(stateModule.getConsecutiveErrors()).toBe(0);
   });
@@ -930,7 +1106,7 @@ describe("_resetForTest", () => {
   it("resets activeTitleEventId to null", () => {
     stateModule.setActiveTitleEventId(asTestEventId("some-id"));
 
-    _resetForTest();
+    resetFixture();
 
     expect(stateModule.getActiveTitleEventId()).toBeNull();
   });
@@ -938,7 +1114,7 @@ describe("_resetForTest", () => {
   it("resets activeInMeetingEventId to null", () => {
     stateModule.setActiveInMeetingEventId(asTestEventId("other-id"));
 
-    _resetForTest();
+    resetFixture();
 
     expect(stateModule.getActiveInMeetingEventId()).toBeNull();
   });
@@ -946,7 +1122,7 @@ describe("_resetForTest", () => {
   it("clears pollTimeout", () => {
     stateModule.state.pollTimeout = setTimeout(() => {}, 1000);
 
-    _resetForTest();
+    resetFixture();
 
     expect(stateModule.state.pollTimeout).toBeNull();
   });
@@ -957,7 +1133,7 @@ describe("_resetForTest", () => {
       setInterval(() => {}, 1000),
     );
 
-    _resetForTest();
+    resetFixture();
     refreshStateRefs();
 
     expect(countdownIntervals.size).toBe(0);

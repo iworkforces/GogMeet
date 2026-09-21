@@ -1,17 +1,13 @@
-import {
-  state,
-  setActiveTitleEventId,
-  setActiveInMeetingEventId,
-  markInMeetingDirty,
-} from "./state/index.js";
 import type { EventId } from "../../domain/entities/brand.js";
+import type { SchedulerRuntime } from "./runtime.js";
 
 /**
  * Determine which event should own the tray title.
  * Policy: earliest startMs among events with an active countdownInterval wins.
  * Updates the tray immediately if ownership changes.
  */
-export function resolveActiveTitleEvent(): void {
+export function resolveActiveTitleEvent(runtime: SchedulerRuntime): void {
+  const { state } = runtime;
   // In-meeting events take priority — don't overwrite
   if (state.activeInMeetingEventId && state.inMeetingIntervals.has(state.activeInMeetingEventId)) {
     return;
@@ -32,7 +28,7 @@ export function resolveActiveTitleEvent(): void {
   }
 
   state.titleDirty = false;
-  setActiveTitleEventId(bestId);
+  state.activeTitleEventId = bestId;
 
   if (bestId) {
     const data = state.scheduledEventData.get(bestId);
@@ -51,7 +47,8 @@ export function resolveActiveTitleEvent(): void {
  * Determine which in-meeting event should own the tray title.
  * Policy: event ending soonest wins.
  */
-export function resolveActiveInMeetingEvent(): void {
+export function resolveActiveInMeetingEvent(runtime: SchedulerRuntime): void {
+  const { state } = runtime;
   // Skip resolution when nothing changed — cached activeInMeetingEventId is still valid
   if (!state.inMeetingDirty && state.activeInMeetingEventId !== null) return;
 
@@ -67,7 +64,7 @@ export function resolveActiveInMeetingEvent(): void {
   }
 
   state.inMeetingDirty = false;
-  setActiveInMeetingEventId(bestId);
+  state.activeInMeetingEventId = bestId;
 
   if (bestId) {
     const data = state.scheduledEventData.get(bestId);
@@ -79,7 +76,7 @@ export function resolveActiveInMeetingEvent(): void {
     }
   } else {
     // No in-meeting event — fall back to pre-meeting
-    resolveActiveTitleEvent();
+    resolveActiveTitleEvent(runtime);
   }
 }
 
@@ -87,7 +84,13 @@ export function resolveActiveInMeetingEvent(): void {
  * Tear down in-meeting countdown for an event at (or after) end.
  * Captured endMs guards against a stale end timer wiping a rescheduled occurrence.
  */
-function finishInMeetingCountdown(eventId: EventId, capturedEndMs: number, title: string): void {
+function finishInMeetingCountdown(
+  runtime: SchedulerRuntime,
+  eventId: EventId,
+  capturedEndMs: number,
+  title: string,
+): void {
+  const { state } = runtime;
   const currentData = state.scheduledEventData.get(eventId);
   // Guard: if the snapshot has been replaced with a newer occurrence (different endMs),
   // this timer is stale — do not touch in-meeting state or the snapshot.
@@ -107,18 +110,20 @@ function finishInMeetingCountdown(eventId: EventId, capturedEndMs: number, title
   state.inMeetingEndTimers.delete(eventId);
   state.scheduledEventData.delete(eventId);
   if (state.activeInMeetingEventId === eventId) {
-    setActiveInMeetingEventId(null);
+    state.activeInMeetingEventId = null;
   }
-  markInMeetingDirty();
-  resolveActiveInMeetingEvent();
+  state.inMeetingDirty = true;
+  resolveActiveInMeetingEvent(runtime);
   console.log(`[scheduler] Meeting ended: "${title}"`);
 }
 
 /** Start per-minute countdown showing remaining time until meeting ends */
 export function startInMeetingCountdown(
+  runtime: SchedulerRuntime,
   eventId: EventId,
   data: { title: string; endMs: number },
 ): void {
+  const { state } = runtime;
   const now = Date.now();
   if (data.endMs <= now) return; // already ended
 
@@ -134,7 +139,7 @@ export function startInMeetingCountdown(
       return;
     }
     // remaining <= 0: end timeout may have been delayed (sleep); clean up now.
-    finishInMeetingCountdown(eventId, capturedEndMs, currentData.title);
+    finishInMeetingCountdown(runtime, eventId, capturedEndMs, currentData.title);
   }
 
   // Immediate tick + per-minute interval
@@ -142,15 +147,15 @@ export function startInMeetingCountdown(
   state.inMeetingIntervals.set(eventId, intervalHandle);
 
   // Resolve ownership, then do first tick
-  markInMeetingDirty();
-  resolveActiveInMeetingEvent();
+  state.inMeetingDirty = true;
+  resolveActiveInMeetingEvent(runtime);
 
   console.log(`[scheduler] In-meeting countdown started for "${data.title}"`);
 
   // Set timer to clear at meeting end. Capture endMs so a stale end timer
   // (from a previous occurrence of this id) cannot delete a newer snapshot.
   const endHandle = setTimeout(() => {
-    finishInMeetingCountdown(eventId, capturedEndMs, data.title);
+    finishInMeetingCountdown(runtime, eventId, capturedEndMs, data.title);
   }, data.endMs - now);
 
   state.inMeetingEndTimers.set(eventId, endHandle);
@@ -160,7 +165,8 @@ export function startInMeetingCountdown(
  * Clear all display-related timers (countdown and in-meeting).
  * Used when clearing tray title after consecutive errors.
  */
-export function clearAllDisplayTimers(): void {
+export function clearAllDisplayTimers(runtime: SchedulerRuntime): void {
+  const { state } = runtime;
   // Only pre-meeting countdown intervals own display sleep blockers.
   for (const handle of state.countdownIntervals.values()) {
     clearInterval(handle);

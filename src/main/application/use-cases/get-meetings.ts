@@ -23,11 +23,13 @@ export function createGetMeetings(deps: GetMeetingsDeps): GetMeetings {
   return {
     async execute(signal: AbortSignal = new AbortController().signal): Promise<CalendarResult> {
       const result = await deps.calendar.getEvents(signal);
+      signal.throwIfAborted();
       const prev = deps.getUiState();
       const oauthConfigured = deps.calendar.isOAuthConfigured?.() ?? false;
 
       if (result.kind === "ok") {
         const email = (await deps.calendar.getAccountLabel?.()) ?? prev.accountEmail;
+        signal.throwIfAborted();
 
         if (result.source === "offline-cache") {
           // Offline never sets permission from kind==="ok"; preserve last recorded.
@@ -90,6 +92,7 @@ export function createGetMeetings(deps: GetMeetingsDeps): GetMeetings {
       }
 
       const permission = await deps.calendar.getPermissionStatus().catch(() => "denied" as const);
+      signal.throwIfAborted();
       deps.setCachedPermission(permission);
       const next: Partial<CalendarUiState> = {
         permission,

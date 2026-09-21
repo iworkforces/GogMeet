@@ -1,94 +1,95 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { asTestEventId, asTestMeetUrl, createMockEvent } from "../helpers/test-utils.js";
+import { describe, expect, it, vi } from "vitest";
+import { createJoinMeeting } from "../../src/main/application/use-cases/join-meeting.js";
+import type { JoinMeetingDeps } from "../../src/main/application/use-cases/join-meeting.js";
+import { err, ok } from "../../src/domain/entities/result.js";
+import {
+  asTestEventId,
+  asTestMeetUrl,
+  createMockEvent,
+  okCalendarResult,
+} from "../helpers/test-utils.js";
 
-const {
-  mockGetLastKnownEvents,
-  mockGetCalendarEventsResult,
-  mockCancelPendingBrowserOpen,
-  mockBuildMeetUrl,
-  mockOpenMeetingUrl,
-} = vi.hoisted(() => ({
-  mockGetLastKnownEvents: vi.fn(),
-  mockGetCalendarEventsResult: vi.fn(),
-  mockCancelPendingBrowserOpen: vi.fn(),
-  mockBuildMeetUrl: vi.fn(),
-  mockOpenMeetingUrl: vi.fn(),
-}));
+const event = createMockEvent({
+  id: asTestEventId("evt-1"),
+  meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
+});
 
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  getLastKnownEvents: mockGetLastKnownEvents,
-  cancelPendingBrowserOpen: mockCancelPendingBrowserOpen,
-}));
-
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  getCalendarEventsResult: mockGetCalendarEventsResult,
-}));
-
-vi.mock("../../src/domain/services/build-meet-url.js", () => ({
-  buildMeetUrl: mockBuildMeetUrl,
-}));
-
-vi.mock("../../src/main/utils/meet-url.js", () => ({
-  openMeetingUrl: mockOpenMeetingUrl,
-}));
-
-import { joinMeetingById } from "../../src/main/utils/join-meeting.js";
-
-describe("joinMeetingById", () => {
-  const event = createMockEvent({
-    id: asTestEventId("evt-1"),
-    meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
+function createJoinHarness() {
+  const getLastKnownEvents = vi.fn<JoinMeetingDeps["getLastKnownEvents"]>(() =>
+    okCalendarResult([event]),
+  );
+  const fetchCalendarEvents = vi.fn<JoinMeetingDeps["fetchCalendarEvents"]>(async () =>
+    okCalendarResult([event]),
+  );
+  const open = vi.fn<JoinMeetingDeps["opener"]["open"]>(async () => ok(undefined));
+  const cancelPendingBrowserOpen = vi.fn<JoinMeetingDeps["cancelPendingBrowserOpen"]>();
+  const joinMeeting = createJoinMeeting({
+    getLastKnownEvents,
+    fetchCalendarEvents,
+    opener: { open },
+    cancelPendingBrowserOpen,
   });
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockBuildMeetUrl.mockReturnValue(
-      "https://meet.google.com/abc-def-ghi?authuser=user%40example.com",
-    );
-    mockOpenMeetingUrl.mockResolvedValue({ ok: true, value: undefined });
-  });
+  return {
+    joinMeeting,
+    getLastKnownEvents,
+    fetchCalendarEvents,
+    open,
+    cancelPendingBrowserOpen,
+  };
+}
 
-  it("opens from cache and marks opened", async () => {
-    mockGetLastKnownEvents.mockReturnValue({ kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] });
+describe("createJoinMeeting", () => {
+  it("opens from cache and cancels the pending auto-open", async () => {
+    const harness = createJoinHarness();
 
-    const result = await joinMeetingById(event.id);
+    const result = await harness.joinMeeting.execute(event.id);
 
     expect(result).toEqual({ ok: true, value: undefined });
-    expect(mockGetCalendarEventsResult).not.toHaveBeenCalled();
-    expect(mockOpenMeetingUrl).toHaveBeenCalledOnce();
-    expect(mockCancelPendingBrowserOpen).toHaveBeenCalledWith(event.id);
+    expect(harness.fetchCalendarEvents).not.toHaveBeenCalled();
+    expect(harness.open).toHaveBeenCalledWith(
+      "https://meet.google.com/abc-def-ghi?authuser=user%40example.com",
+    );
+    expect(harness.cancelPendingBrowserOpen).toHaveBeenCalledWith(event.id);
   });
 
-  it("fallback-fetches when id missing from ok cache", async () => {
-    mockGetLastKnownEvents.mockReturnValue({ kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] });
-    mockGetCalendarEventsResult.mockResolvedValue({ kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] });
+  it("fetches when the event is missing from the cached result", async () => {
+    const harness = createJoinHarness();
+    harness.getLastKnownEvents.mockReturnValue(okCalendarResult());
 
-    const result = await joinMeetingById(event.id);
+    const result = await harness.joinMeeting.execute(event.id);
 
-    expect(result.ok).toBe(true);
-    expect(mockGetCalendarEventsResult).toHaveBeenCalledOnce();
-    expect(mockCancelPendingBrowserOpen).toHaveBeenCalledWith(event.id);
+    expect(result).toEqual({ ok: true, value: undefined });
+    expect(harness.fetchCalendarEvents).toHaveBeenCalledOnce();
+    expect(harness.open).toHaveBeenCalledWith(
+      "https://meet.google.com/abc-def-ghi?authuser=user%40example.com",
+    );
+    expect(harness.cancelPendingBrowserOpen).toHaveBeenCalledWith(event.id);
   });
 
-  it("returns err and does not mark opened when open fails", async () => {
-    mockGetLastKnownEvents.mockReturnValue({ kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [event] });
-    mockOpenMeetingUrl.mockResolvedValue({ ok: false, error: "blocked" });
+  it("does not cancel the pending auto-open when opening fails", async () => {
+    const harness = createJoinHarness();
+    harness.open.mockResolvedValue(err("blocked"));
 
-    const result = await joinMeetingById(event.id);
+    const result = await harness.joinMeeting.execute(event.id);
 
     expect(result).toEqual({ ok: false, error: "blocked" });
-    expect(mockCancelPendingBrowserOpen).not.toHaveBeenCalled();
+    expect(harness.cancelPendingBrowserOpen).not.toHaveBeenCalled();
   });
 
-  it("returns calendar error code path message when fetch fails", async () => {
-    mockGetLastKnownEvents.mockReturnValue(null);
-    mockGetCalendarEventsResult.mockResolvedValue({
+  it("returns the calendar error when the fallback fetch fails", async () => {
+    const harness = createJoinHarness();
+    harness.getLastKnownEvents.mockReturnValue(null);
+    harness.fetchCalendarEvents.mockResolvedValue({
       kind: "err",
       error: "denied",
       code: "permission-denied",
     });
 
-    const result = await joinMeetingById(event.id);
+    const result = await harness.joinMeeting.execute(event.id);
+
     expect(result).toEqual({ ok: false, error: "denied" });
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.cancelPendingBrowserOpen).not.toHaveBeenCalled();
   });
 });

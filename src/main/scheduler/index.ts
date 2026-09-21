@@ -1,17 +1,16 @@
-import { getSettings } from "../facades/settings.js";
 import type { MeetingEvent } from "../../domain/entities/meeting-event.js";
 import type { EventId } from "../../domain/entities/brand.js";
-import { state } from "./state/index.js";
-import { getLateJoinGraceMs, setLateJoinGraceFromSettings } from "./late-join.js";
 import { planSchedule } from "./core/plan-schedule.js";
 import type { ScheduleSnapshot } from "./core/schedule-types.js";
 import { interpretSchedulePlan } from "./adapters/interpret-schedule.js";
+import type { SchedulerRuntime } from "./runtime.js";
 
-export { getLateJoinGraceMs, isLateJoinEligible, _setLateJoinGraceMsForTest } from "./late-join.js";
+export { isLateJoinEligible } from "./late-join.js";
 export { planSchedule, getOpenBeforeMs, MAX_SCHEDULE_AHEAD_MS } from "./core/plan-schedule.js";
 export type { ScheduleAction, SchedulePlan, ScheduleSnapshot } from "./core/schedule-types.js";
 
-function buildScheduleSnapshot(): ScheduleSnapshot {
+function buildScheduleSnapshot(runtime: SchedulerRuntime): ScheduleSnapshot {
+  const { state } = runtime;
   return {
     firedEvents: state.firedEvents,
     alertFiredEvents: state.alertFiredEvents,
@@ -34,19 +33,16 @@ function buildScheduleSnapshot(): ScheduleSnapshot {
  *
  * Pure decisions live in {@link planSchedule}; side effects in interpret.
  */
-export function scheduleEvents(events: MeetingEvent[]): void {
+export function scheduleEvents(runtime: SchedulerRuntime, events: readonly MeetingEvent[]): void {
   const now = Date.now();
-  const settings = getSettings();
+  const settings = runtime.dependencies.settings.get();
 
-  // Keep settings-backed grace in sync (does not clobber test override).
-  setLateJoinGraceFromSettings(settings.lateJoinGraceMinutes);
+  const capturedEpoch = runtime.state.pollEpoch;
+  const shouldAbort = (): boolean => runtime.state.pollEpoch !== capturedEpoch;
 
-  const capturedEpoch = state.pollEpoch;
-  const shouldAbort = (): boolean => state.pollEpoch !== capturedEpoch;
-
-  const plan = planSchedule(events, settings, now, buildScheduleSnapshot(), {
-    lateJoinGraceMs: getLateJoinGraceMs(),
+  const plan = planSchedule(events, settings, now, buildScheduleSnapshot(runtime), {
+    lateJoinGraceMs: settings.lateJoinGraceMinutes * 60_000,
   });
 
-  interpretSchedulePlan(plan, { shouldAbort });
+  interpretSchedulePlan(runtime, plan, { shouldAbort });
 }

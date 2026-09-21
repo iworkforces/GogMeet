@@ -1,16 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EventId } from "../../src/domain/entities/brand.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
+import type { AppSettings } from "../../src/domain/entities/settings.js";
+import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
 import {
   asTestEventId,
   asTestIsoUtc,
   createMockEvent,
   createMockSettings,
 } from "../helpers/test-utils.js";
-
-const { getSettingsMock } = vi.hoisted(() => ({
-  getSettingsMock: vi.fn(),
-}));
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 vi.mock("electron", () => {
   function MockNotification(this: { show: ReturnType<typeof vi.fn> }) {
@@ -23,10 +21,6 @@ vi.mock("electron", () => {
   };
 });
 
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: getSettingsMock,
-}));
-
 vi.mock("../../src/main/windows/alert-window.js", () => ({
   showAlert: vi.fn(),
 }));
@@ -37,15 +31,9 @@ vi.mock("../../src/domain/services/build-meet-url.js", () => ({
     .mockReturnValue("https://meet.google.com/abc-def-ghi?authuser=user%40test.com"),
 }));
 
-vi.mock("../../src/main/utils/meet-url.js", () => ({
-  openMeetingUrl: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
-}));
-
 const { scheduleEvents } = await import("../../src/main/scheduler/index.js");
 const { scheduleBrowserTimer } = await import("../../src/main/scheduler/browser-timer.js");
 const { buildMeetUrl } = await import("../../src/domain/services/build-meet-url.js");
-const { openMeetingUrl } = await import("../../src/main/utils/meet-url.js");
-const stateModule = await import("../../src/main/scheduler/state/index.js");
 
 const BASE_NOW = new Date("2026-06-18T12:00:00.000Z").getTime();
 const MINUTE_MS = 60_000;
@@ -64,64 +52,65 @@ function makeEvent(
   });
 }
 
-function setOpenBeforeMinutes(minutes: number): void {
-  getSettingsMock.mockReturnValue(
-    createMockSettings({ openBeforeMinutes: minutes, windowAlert: false }),
-  );
-}
-
 describe("scheduler browser auto-open deadline", () => {
+  let settings: AppSettings;
+  let runtime: SchedulerRuntime;
+  let open: ReturnType<typeof schedulerTestContext>["open"];
+
+  function setOpenBeforeMinutes(minutes: number): void {
+    settings = createMockSettings({ openBeforeMinutes: minutes, windowAlert: false });
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(BASE_NOW);
-    stateModule.resetState();
     setOpenBeforeMinutes(3);
+    const context = schedulerTestContext(() => settings);
+    runtime = context.runtime;
+    open = context.open;
     vi.mocked(buildMeetUrl).mockClear();
-    vi.mocked(openMeetingUrl).mockClear();
   });
 
   afterEach(() => {
-    stateModule.resetState();
     vi.useRealTimers();
     vi.mocked(buildMeetUrl).mockClear();
-    vi.mocked(openMeetingUrl).mockClear();
   });
 
   it("opens a future meeting at the configured offset before start", () => {
     const startMs = BASE_NOW + 10 * MINUTE_MS;
     const event = makeEvent("deadline-happy", startMs, startMs + 30 * MINUTE_MS);
 
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
     vi.advanceTimersByTime(7 * MINUTE_MS);
 
-    expect(openMeetingUrl).toHaveBeenCalledTimes(1);
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(true);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
   });
 
   it("opens an unchanged future meeting after scheduler epoch changes", () => {
     const startMs = BASE_NOW + 10 * MINUTE_MS;
     const event = makeEvent("deadline-epoch-change", startMs, startMs + 30 * MINUTE_MS);
 
-    scheduleEvents([event]);
-    stateModule.state.pollEpoch += 1;
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
+    runtime.state.pollEpoch += 1;
+    scheduleEvents(runtime, [event]);
     vi.advanceTimersByTime(7 * MINUTE_MS);
 
-    expect(openMeetingUrl).toHaveBeenCalledTimes(1);
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(true);
-    expect(stateModule.state.timers.has(event.id)).toBe(false);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
+    expect(runtime.state.timers.has(event.id)).toBe(false);
   });
 
   it("does not open a future meeting before the configured offset", () => {
     const startMs = BASE_NOW + 10 * MINUTE_MS;
     const event = makeEvent("deadline-early", startMs, startMs + 30 * MINUTE_MS);
 
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
     vi.advanceTimersByTime(7 * MINUTE_MS - 1);
 
-    expect(openMeetingUrl).not.toHaveBeenCalled();
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(false);
-    expect(stateModule.state.timers.has(event.id)).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+    expect(runtime.state.timers.has(event.id)).toBe(true);
   });
 
   it("reschedules when openBeforeMinutes changes between polls", () => {
@@ -129,31 +118,31 @@ describe("scheduler browser auto-open deadline", () => {
     const event = makeEvent("deadline-settings-change", startMs, startMs + 30 * MINUTE_MS);
 
     setOpenBeforeMinutes(1);
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
 
     setOpenBeforeMinutes(3);
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
 
     vi.advanceTimersByTime(7 * MINUTE_MS - 1);
-    expect(openMeetingUrl).not.toHaveBeenCalled();
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
 
     vi.advanceTimersByTime(1);
-    expect(openMeetingUrl).toHaveBeenCalledTimes(1);
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(true);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
   });
 
   it("does not auto-open an in-progress meeting first discovered after start", () => {
     const startMs = BASE_NOW - 30_000;
     const event = makeEvent("deadline-started", startMs, BASE_NOW + 30 * MINUTE_MS);
 
-    scheduleEvents([event]);
+    scheduleEvents(runtime, [event]);
     vi.advanceTimersByTime(50);
 
-    expect(openMeetingUrl).not.toHaveBeenCalled();
-    expect(stateModule.state.firedEvents.has(event.id)).toBe(false);
-    expect(stateModule.state.timers.has(event.id)).toBe(false);
-    expect(stateModule.state.inMeetingIntervals.has(event.id)).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+    expect(runtime.state.timers.has(event.id)).toBe(false);
+    expect(runtime.state.inMeetingIntervals.has(event.id)).toBe(true);
   });
 
   it("does not open when a browser timer callback runs at or after meeting start", () => {
@@ -161,24 +150,14 @@ describe("scheduler browser auto-open deadline", () => {
     const endMs = startMs + 30 * MINUTE_MS;
     const event = makeEvent("deadline-late-callback", startMs, endMs);
     const openAtMs = startMs - 2 * MINUTE_MS;
-    const timers = new Map<EventId, ReturnType<typeof setTimeout>>();
-    const firedEvents = new Map<EventId, number>();
 
-    scheduleBrowserTimer(
-      event,
-      2 * MINUTE_MS,
-      openAtMs,
-      startMs,
-      endMs,
-      timers,
-      firedEvents,
-    );
+    scheduleBrowserTimer(runtime, event, 2 * MINUTE_MS, openAtMs, startMs, endMs, 0);
     vi.advanceTimersByTime(2 * MINUTE_MS);
 
     expect(buildMeetUrl).not.toHaveBeenCalled();
-    expect(openMeetingUrl).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
     // Past start with grace 0: mark fired so we do not reschedule storms
-    expect(firedEvents.has(event.id)).toBe(true);
-    expect(timers.has(event.id)).toBe(false);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
+    expect(runtime.state.timers.has(event.id)).toBe(false);
   });
 });

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
+import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
+import type { AppGraphOverrides } from "../../src/main/composition/app-graph.js";
 import { createMockEvent as createSharedMockEvent, asTestIsoUtc } from "../helpers/test-utils.js";
 import { testAppGraph } from "../helpers/app-graph.js";
 
@@ -43,46 +45,12 @@ vi.mock("electron", () => ({
   }),
 }));
 
-vi.mock("../../src/main/facades/calendar.js", () => ({
-  getCalendarEventsResult: vi.fn().mockResolvedValue({
-    kind: "ok",
-    source: "live",
-    completeness: "complete",
-    observedAt: Date.now(),
-    events: [],
-  }),
-  getCalendarUiState: vi.fn().mockReturnValue({
-    permission: "not-determined",
-    phase: "disconnected",
-    lastError: null,
-    accountEmail: null,
-    events: null,
-    offline: false,
-    oauthConfigured: false,
-    darwinPartialRefreshDiagnostics: null,
-    cacheAgeMs: null,
-  }),
-  requestCalendarPermission: vi.fn().mockResolvedValue("granted"),
-  disconnectCalendar: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock("../../src/main/scheduler/facade.js", () => ({
-  forcePoll: vi.fn(),
-}));
-
 vi.mock("../../src/domain/services/build-meet-url.js", () => ({
   buildMeetUrl: vi.fn((event: MeetingEvent) => event.meetUrl || ""),
 }));
 
 vi.mock("../../src/main/windows/about-window.js", () => ({
   showAbout: vi.fn(),
-}));
-
-vi.mock("../../src/main/facades/settings.js", () => ({
-  getSettings: vi.fn().mockReturnValue({
-    showTomorrowMeetings: true,
-    showCompletedTodayMeetings: false,
-  }),
 }));
 
 const platformState = vi.hoisted(() => ({ darwin: true }));
@@ -100,6 +68,47 @@ function createMockEvent(overrides: Partial<MeetingEvent> = {}): MeetingEvent {
     startDate: asTestIsoUtc(now.toISOString()),
     endDate: asTestIsoUtc(in1Hour.toISOString()),
     ...overrides,
+  });
+}
+
+function createTrayGraph(overrides: AppGraphOverrides = {}) {
+  return testAppGraph({
+    ...overrides,
+    calendar: {
+      getEvents: vi.fn().mockResolvedValue({
+        publicationGeneration: 1,
+        result: {
+          kind: "ok",
+          source: "live",
+          completeness: "complete",
+          observedAt: Date.now(),
+          events: [],
+        },
+      }),
+      requestPermission: vi.fn().mockResolvedValue("granted"),
+      getPermissionStatus: vi.fn().mockResolvedValue("not-determined"),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getUiState: vi.fn().mockReturnValue({
+        permission: "not-determined",
+        phase: "disconnected",
+        lastError: null,
+        accountEmail: null,
+        events: null,
+        offline: false,
+        oauthConfigured: false,
+        darwinPartialRefreshDiagnostics: null,
+        cacheAgeMs: null,
+      }),
+      ...overrides.calendar,
+    },
+    settings: {
+      get: vi.fn().mockReturnValue({ ...DEFAULT_SETTINGS }),
+      ...overrides.settings,
+    },
+    scheduler: {
+      forcePoll: vi.fn().mockResolvedValue(null),
+      ...overrides.scheduler,
+    },
   });
 }
 
@@ -211,7 +220,7 @@ describe("tray module exports", () => {
     const { Tray } = await import("electron");
 
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
 
     expect(Tray).toHaveBeenCalled();
   });
@@ -221,7 +230,7 @@ describe("tray module exports", () => {
     const { Tray } = await import("electron");
 
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
 
     const trayInstance = getLatestTrayInstance(Tray);
     expect(trayInstance.setToolTip).toHaveBeenCalledWith("GogMeet");
@@ -232,7 +241,7 @@ describe("tray module exports", () => {
     const { nativeTheme } = await import("electron");
 
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
 
     expect(nativeTheme.on).toHaveBeenCalledWith("updated", expect.any(Function));
   });
@@ -245,8 +254,8 @@ describe("tray module exports", () => {
     vi.mocked(app.once).mockClear();
 
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph()); // First call: registers before-quit
-    setupTray(mockWindow, testAppGraph()); // Second call: should skip
+    setupTray(mockWindow, createTrayGraph()); // First call: registers before-quit
+    setupTray(mockWindow, createTrayGraph()); // Second call: should skip
 
     const beforeQuitCalls = vi
       .mocked(app.once)
@@ -262,7 +271,7 @@ describe("tray module exports", () => {
     const mockWindow = new BrowserWindow();
 
     // When: setup registers the tray item.
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
     await flushTrayRebuild();
 
     // Then: the native tray menu is already installed for the first status-item activation.
@@ -283,7 +292,7 @@ describe("tray module exports", () => {
 
     // Given: a tray exists with its initial loading menu installed.
     const mockWindow = new BrowserWindow();
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
     await flushTrayRebuild();
     const trayInstance = getLatestTrayInstance(Tray);
     vi.mocked(trayInstance.setContextMenu).mockClear();
@@ -299,11 +308,11 @@ describe("tray module exports", () => {
   it("on Windows left-click forcePolls and popUpContextMenu", async () => {
     platformState.darwin = false;
     const { setupTray } = await import("../../src/main/tray.js");
-    const { forcePoll } = await import("../../src/main/scheduler/facade.js");
     const { BrowserWindow, Tray, Menu } = await import("electron");
 
+    const forcePoll = vi.fn().mockResolvedValue(null);
     const mockWindow = new BrowserWindow();
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph({ scheduler: { forcePoll } }));
     await flushTrayRebuild();
     const trayInstance = getLatestTrayInstance(Tray);
 
@@ -323,12 +332,11 @@ describe("tray module exports", () => {
   it("on Darwin left-click forcePolls without popUpContextMenu", async () => {
     platformState.darwin = true;
     const { setupTray } = await import("../../src/main/tray.js");
-    const { forcePoll } = await import("../../src/main/scheduler/facade.js");
     const { BrowserWindow, Tray } = await import("electron");
 
-    vi.mocked(forcePoll).mockClear();
+    const forcePoll = vi.fn().mockResolvedValue(null);
     const mockWindow = new BrowserWindow();
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph({ scheduler: { forcePoll } }));
     const trayInstance = getLatestTrayInstance(Tray);
     vi.mocked(trayInstance.popUpContextMenu).mockClear();
 
@@ -346,7 +354,7 @@ describe("tray module exports", () => {
     const { setupTray, updateTrayTitle } = await import("../../src/main/tray.js");
     const { Tray } = await import("electron");
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
     const trayInstance = getLatestTrayInstance(Tray);
     updateTrayTitle("Standup Meeting Title", 12, false);
     expect(trayInstance.setTitle).toHaveBeenCalled();
@@ -357,7 +365,7 @@ describe("tray module exports", () => {
     vi.resetModules();
     const tray2 = await import("../../src/main/tray.js");
     const electron = await import("electron");
-    tray2.setupTray({} as never, testAppGraph());
+    tray2.setupTray({} as never, createTrayGraph());
     const inst = getLatestTrayInstance(electron.Tray);
     tray2.updateTrayTitle("Win Meet", 5, true);
     expect(inst.setToolTip).toHaveBeenCalled();
@@ -371,7 +379,7 @@ describe("tray module exports", () => {
     vi.mocked(nativeTheme.on).mockClear();
     vi.mocked(nativeTheme.removeListener).mockClear();
     const mockWindow = {} as Parameters<typeof setupTray>[0];
-    setupTray(mockWindow, testAppGraph());
+    setupTray(mockWindow, createTrayGraph());
     const trayInstance = getLatestTrayInstance(Tray);
     trayInstance.destroy = vi.fn();
     const themeCalls = vi.mocked(nativeTheme.on).mock.calls.filter((c) => c[0] === "updated");
@@ -389,7 +397,7 @@ describe("tray module exports", () => {
     const { Tray, Menu } = await import("electron");
     // No tray yet — must not throw.
     forceTrayMenuRefresh();
-    setupTray({} as never, testAppGraph());
+    setupTray({} as never, createTrayGraph());
     await flushTrayRebuild();
     const trayInstance = getLatestTrayInstance(Tray);
     vi.mocked(trayInstance.setContextMenu).mockClear();
@@ -407,7 +415,7 @@ describe("tray module exports", () => {
     const { setupTray } = await import("../../src/main/tray.js");
     const { mainBus } = await import("../../src/main/events.js");
     const { Tray } = await import("electron");
-    setupTray({} as never, testAppGraph());
+    setupTray({} as never, createTrayGraph());
     await flushTrayRebuild();
     const trayInstance = getLatestTrayInstance(Tray);
     vi.mocked(trayInstance.setContextMenu).mockClear();
@@ -442,7 +450,7 @@ describe("tray module exports", () => {
       cacheAgeMs: null,
     };
 
-    setupTray(new BrowserWindow(), testAppGraph());
+    setupTray(new BrowserWindow(), createTrayGraph());
     await flushTrayRebuild();
     const trayInstance = getLatestTrayInstance(Tray);
     mainBus.emit("calendar-status-updated", {
@@ -500,7 +508,7 @@ describe("tray module exports", () => {
     const { setupTray } = await import("../../src/main/tray.js");
     const { nativeTheme, Tray } = await import("electron");
     vi.mocked(nativeTheme.on).mockClear();
-    setupTray({} as never, testAppGraph());
+    setupTray({} as never, createTrayGraph());
     const trayInstance = getLatestTrayInstance(Tray);
     const themeCalls = vi.mocked(nativeTheme.on).mock.calls.filter((c) => c[0] === "updated");
     const themeHandler = themeCalls[themeCalls.length - 1]?.[1] as (() => void) | undefined;
@@ -516,7 +524,7 @@ describe("tray module exports", () => {
     const requestPermission = vi.fn().mockResolvedValue("granted");
     const disconnect = vi.fn().mockResolvedValue(undefined);
     const event = createMockEvent();
-    const graph = testAppGraph({
+    const graph = createTrayGraph({
       join: { byId: join },
       settings: {
         get: () =>
@@ -603,7 +611,7 @@ describe("tray module exports", () => {
     platformState.darwin = false;
     const trayMod = await import("../../src/main/tray.js");
     const electron2 = await import("electron");
-    const graph2 = testAppGraph({
+    const graph2 = createTrayGraph({
       calendar: {
         getEvents: vi.fn(),
         requestPermission,
@@ -654,7 +662,7 @@ describe("tray module exports", () => {
     platformState.darwin = true;
     const trayMod3 = await import("../../src/main/tray.js");
     const electron3 = await import("electron");
-    const graph3 = testAppGraph({
+    const graph3 = createTrayGraph({
       calendar: {
         getEvents: vi.fn(),
         requestPermission,
@@ -707,7 +715,7 @@ describe("tray module exports", () => {
     });
     const forcePoll = vi.fn().mockReturnValue(pollPromise);
     const event = createMockEvent();
-    const graph = testAppGraph({
+    const graph = createTrayGraph({
       settings: {
         get: () =>
           ({

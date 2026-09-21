@@ -156,6 +156,14 @@ const rules = [
     message: "Do not hardcode GOGMEET_PERF_TRACE=1 in product source",
     fileFilter: (f) => f.startsWith("src/"),
   },
+  {
+    id: "G14-app-graph-global-seams",
+    pattern:
+      /\b(?:skipBind|bindComposition|bindMeetingOpener|rebindMeetingOpenerDefaults|bindJoinMeeting|rebindJoinMeetingDefaults)\b/,
+    skipComments: true,
+    message: "Removed AppGraph global composition/rebinding seam must not return",
+    fileFilter: (f) => f.startsWith("src/"),
+  },
 ];
 
 function runScan() {
@@ -180,13 +188,29 @@ function selfTest() {
     { id: "G1-syncToken-scope", line: "const t = syncToken;" },
     { id: "O3-nodeIntegration-true", line: "nodeIntegration: true," },
     { id: "G6-force-poll-channel", line: 'SCHEDULER_FORCE_POLL: "scheduler:force-poll"' },
+    { id: "G14-app-graph-global-seams", line: "skipBind" },
+    { id: "G14-app-graph-global-seams", line: "bindComposition" },
+    { id: "G14-app-graph-global-seams", line: "bindMeetingOpener" },
+    { id: "G14-app-graph-global-seams", line: "rebindMeetingOpenerDefaults" },
+    { id: "G14-app-graph-global-seams", line: "bindJoinMeeting" },
+    { id: "G14-app-graph-global-seams", line: "rebindJoinMeetingDefaults" },
   ];
+  const negativeSamples = ["skipBinding", "bindWindowsThemeBackground"];
   let ok = true;
   for (const s of samples) {
     const rule = rules.find((r) => r.id === s.id);
     if (!rule || !rule.pattern.test(s.line)) {
       console.error(`[guardrails:self-test] rule ${s.id} failed to match sample`);
       ok = false;
+    }
+  }
+  const appGraphSeamRule = rules.find((r) => r.id === "G14-app-graph-global-seams");
+  if (appGraphSeamRule) {
+    for (const line of negativeSamples) {
+      if (appGraphSeamRule.pattern.test(line)) {
+        console.error(`[guardrails:self-test] rule ${appGraphSeamRule.id} matched negative sample`);
+        ok = false;
+      }
     }
   }
   // Allowlist must include shell-meeting-opener
@@ -207,7 +231,9 @@ if (args.includes("--self-test")) {
 const list = runScan();
 if (list.length > 0) {
   printFindings(list);
-  console.error(`\n[guardrails] ${list.length} finding(s). See docs/security/permanent-guardrails.md`);
+  console.error(
+    `\n[guardrails] ${list.length} finding(s). See docs/security/permanent-guardrails.md`,
+  );
   process.exit(1);
 }
 console.log("[guardrails] clean");

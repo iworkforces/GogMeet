@@ -1,7 +1,7 @@
 # GogMeet - AGENTS.md
 
-- **Updated:** 2026-08-13
-- **App version:** 1.19.0
+- **Updated:** 2026-09-21
+- **App version:** 2.0.0
 - **Branch:** develop
 
 `package.json` is the version source of truth. Keep this root metadata aligned with it, but do not hardcode the version elsewhere. Shipped vs open backlog: `docs/STATUS.md`.
@@ -12,12 +12,12 @@ Desktop tray app for calendar meeting reminders. **macOS** reads EventKit via a 
 
 | Layer              | Tech                                                                                                                                                                                                                                             |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Runtime            | Electron `^43.4.0`; all BrowserWindows sandboxed/context-isolated/no Node integration                                                                                                                                                            |
+| Runtime            | Electron `^44.4.3`; all BrowserWindows sandboxed/context-isolated/no Node integration                                                                                                                                                            |
 | Language           | Typecheck via `@typescript/native` (TypeScript `^7.0.2`); package `typescript` `^6` for ESLint tooling; `isolatedDeclarations`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `noPropertyAccessFromIndexSignature`, `exactOptionalPropertyTypes` |
 | Build              | Rslib for main/preload CJS; Rsbuild for three renderer entries                                                                                                                                                                                   |
-| Package            | Bun `>=1.3.0`, `packageManager: bun@1.3.14`; host Node floor `>=20`, CI/recommended Node `26` (`.nvmrc`)                                                                                                                                         |
-| Calendar (macOS)   | Swift EventKit helper: `googlemeet-events.swift` + `swift/event-occurrence-identity.swift` (occurrence-aware UIDs); binary under `{tmpdir}/googlemeet/`; bounded spawn runner                                                                   |
-| Calendar (Windows) | Google OAuth PKCE + Calendar API; encrypted under `userData` with owner-only modes: tokens `calendar-auth/google.enc`, sync tokens `calendar-auth/google-sync.enc`, offline cache `calendar-cache.enc`                                          |
+| Package            | Bun `>=1.3.0`, `packageManager: bun@1.4.1`; host Node floor `>=20`, CI/recommended Node `26` (`.nvmrc`)                                                                                                                                          |
+| Calendar (macOS)   | Swift EventKit helper: `googlemeet-events.swift` + `swift/event-occurrence-identity.swift` (occurrence-aware UIDs); binary under `{tmpdir}/googlemeet/`; bounded spawn runner                                                                    |
+| Calendar (Windows) | Google OAuth PKCE + Calendar API; encrypted under `userData` with owner-only modes: tokens `calendar-auth/google.enc`, sync tokens `calendar-auth/google-sync.enc`, offline cache `calendar-cache.enc`                                           |
 | Architecture       | Clean Architecture hybrid: `src/domain` → application ports/use cases → infrastructure adapters → facades + `createAppGraph`                                                                                                                     |
 | Test               | Vitest workspace: domain / application / main / renderer / shared / scripts; `setup.as.ts` installs cast extension                                                                                                                               |
 | Package build      | electron-builder: mac DMG+ZIP; win NSIS+portable; `arm64` + `x64`                                                                                                                                                                                |
@@ -34,10 +34,10 @@ GogMeet/
 │   ├── domain/           # pure: entities, policies, services (no Electron)
 │   ├── shared/           # IPC maps + thin DTOs + cast/escape/aurora helpers (imports domain types)
 │   ├── main/
-│   │   ├── composition/  # createAppGraph, bindComposition, createTestAppGraph
+│   │   ├── composition/  # createAppGraph, createTestAppGraph
 │   │   ├── application/  # ports + use cases
 │   │   ├── infrastructure/ # JsonSettingsStore, ShellMeetingOpener
-│   │   ├── facades/      # calendar, watcher, status, settings (default binds)
+│   │   ├── facades/      # calendar, watcher, status, settings factories
 │   │   ├── calendar/     # factory, providers, google-http, offline-cache, auth (+ sync tokens), refresh-coordinator
 │   │   ├── scheduler/    # facade + planSchedule (pure) + interpret + state/
 │   │   ├── ipc-handlers/ # typed IPC (receives AppGraph)
@@ -78,9 +78,9 @@ Skip generated/cache outputs: `lib/`, `dist/`, `coverage/`, `node_modules/`, `.e
 | URL extract / buildMeetUrl | `domain/services/url-extract.ts`, `build-meet-url.ts`                                                       | pure                                                                                                                                                                                   |
 | Allowlist / validate       | `domain/policies/meet-url-allowlist.ts`, `services/url-validation.ts`                                       | pure                                                                                                                                                                                   |
 | Meeting wall-clock         | `domain/services/meeting-time.ts`                                                                           | in-progress / upcoming / completed-today / display horizon                                                                                                                             |
-| Open meeting URL           | `infrastructure/electron/shell-meeting-opener.ts`                                                           | allowlisted egress; thin free-fn in `utils/meet-url.ts`                                                                                                                                |
+| Open meeting URL           | `infrastructure/electron/shell-meeting-opener.ts`                                                           | allowlisted egress; exposed as `graph.opener` and injected into scheduler and join                                                                                                     |
 | Settings store             | `infrastructure/settings/json-settings-store.ts`                                                            | FS under userData; schema **v3**                                                                                                                                                       |
-| Join hub                   | `utils/join-meeting.ts` / `graph.join.byId`                                                                 | marks opened via scheduler cancel                                                                                                                                                      |
+| Join hub                   | `application/use-cases/join-meeting.ts` / `graph.join.byId`                                                 | injected opener; successful explicit join cancels pending browser auto-open                                                                                                            |
 | Scheduler public API       | `scheduler/facade.ts`                                                                                       | only external scheduler import                                                                                                                                                         |
 | Schedule decisions         | `scheduler/core/plan-schedule.ts`                                                                           | pure; `set-snapshot` before timers                                                                                                                                                     |
 | Display horizon            | `system/display-horizon.ts`                                                                                 | wall-clock re-filter timer; no automation                                                                                                                                              |
@@ -99,37 +99,37 @@ Skip generated/cache outputs: `lib/`, `dist/`, `coverage/`, `node_modules/`, `.e
 | Perf scripts               | `scripts/performance/*`                                                                                     | `perf:report`, `perf:workspace-fingerprint`, `perf:startup`/`tray`/`alert`/`safe-storage` (exit 1 on crash/timeout)                                                                    |
 | Parser bench               | `tests/bench/`, `vitest.bench.config.ts`                                                                    | `bench:calendar-parser`                                                                                                                                                                |
 | OS vs meeting host         | `platform/os.ts` vs `domain/services/platform.ts`                                                           |                                                                                                                                                                                        |
-| Packaging / CI             | `electron-builder.yml`, `build/AGENTS.md`, `.github/workflows/AGENTS.md`, `check:swift-package-layout`       | dual Swift sources + dual-source hash formula                                                                                                                                          |
+| Packaging / CI             | `electron-builder.yml`, `build/AGENTS.md`, `.github/workflows/AGENTS.md`, `check:swift-package-layout`      | dual Swift sources + dual-source hash formula                                                                                                                                          |
 | Shipped vs backlog         | `docs/STATUS.md`                                                                                            | prefer over historical `docs/enhancement-development-plan.md`                                                                                                                          |
 | Design / perf plan         | `docs/clean-architecture-refactor-plan.md`, `docs/windows-*.md`, `docs/plans/*`, `docs/adr/*`               |                                                                                                                                                                                        |
 | Secure secret files        | `main/utils/secure-fs.ts`                                                                                   | `0o700` dirs / `0o600` files for OAuth, sync tokens, offline cache                                                                                                                     |
-| Shared meeting opener      | `utils/meet-url.ts` + `composition/app-graph.ts`                                                            | single bound opener for IPC, join hub, auto-open                                                                                                                                       |
+| Shared meeting opener      | `composition/app-graph.ts`                                                                                  | one graph-local opener for IPC, explicit joins, and scheduler auto-open                                                                                                                |
 
 ## CODE MAP
 
-| Symbol / file                                              | Role                                                         |
-| ---------------------------------------------------------- | ------------------------------------------------------------ |
-| `createAppGraph()`                                         | composition root for main drivers                            |
-| `initializeApp()` / `shutdownApp()`                        | lifecycle; graph stored as `activeGraph`                     |
-| `facades/calendar.ts`                                      | calendar use cases + UI state bus + refresh coordinator bind |
-| `refreshCalendarPublication` / `requestCalendarRefresh`    | single-flight fetch → `CalendarPublication`                  |
-| `graph.calendar.getEvents` / `getEventsResult`             | publication vs result-only coordinated refresh               |
-| `scheduler/facade.ts`                                      | only external scheduler import                               |
-| `republishUiForDisplayTick`                                | facade free-fn for wall-clock UI re-push (not on AppGraph)   |
-| `scheduler/core/plan-schedule.ts`                          | pure schedule plan ADT (`set-snapshot`, arm-*)               |
-| `domain/services/build-meet-url.ts`                        | pure join URL with identity params                           |
-| `filterCompletedTodayMeetings` / `isCompletedTodayMeeting` | completed-today history membership                           |
-| `truncateMiddle` / `MEETING_TITLE_DISPLAY_MAX_CHARS`       | title display middle-truncate (25)                           |
-| `joinMeetingById` / `graph.join.byId`                      | join hub + suppress auto-open                                |
-| `isCalendarOk` / `isCalendarAutomationEligible`            | ok narrowing; automation gate (live complete only)           |
-| `DarwinPartialRefreshDiagnostics`                          | six-count aggregate for Darwin live partial results          |
-| `googleHttpRequest` / `refreshGoogleAccessToken`           | bounded Google transport; force/if-needed refresh            |
-| `loadGoogleSyncTokens` / `saveGoogleSyncTokens`            | encrypted Google nextSyncToken map                           |
-| `eventRecordIdentifier` (Swift)                            | occurrence-aware EventKit uid (`id:bitPattern`)              |
-| `readSwiftSource` / `COMPILED_SWIFT_SOURCE_PATH`           | dual-source concat for compile + `source.hash`               |
-| `bindMeetingOpener` / `openMeetingUrl`                     | composition-bound egress (not a second shell opener)         |
-| `formatOfflineCacheAgeLabel`                               | tray offline age from `cacheAgeMs`                           |
-| `ensureSecureDir` / `writeSecureFile`                      | owner-only modes for secret/cache paths                      |
+| Symbol / file                                              | Role                                                                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `createAppGraph(overrides?: AppGraphOverrides)`            | graph-local composition root; finalizes overrides before downstream closures use them |
+| `initializeApp()` / `shutdownApp()`                        | lifecycle; graph stored as `activeGraph`                                              |
+| `facades/calendar.ts`                                      | calendar use cases + UI state bus + refresh coordinator bind                          |
+| `refreshCalendarPublication` / `requestCalendarRefresh`    | single-flight fetch → `CalendarPublication`                                           |
+| `graph.calendar.getEvents` / `getEventsResult`             | publication vs result-only coordinated refresh                                        |
+| `scheduler/facade.ts`                                      | only external scheduler import                                                        |
+| `graph.scheduler.republishUiForDisplayTick`                | wall-clock UI re-push on the graph-local scheduler                                    |
+| `scheduler/core/plan-schedule.ts`                          | pure schedule plan ADT (`set-snapshot`, arm-*)                                        |
+| `domain/services/build-meet-url.ts`                        | pure join URL with identity params                                                    |
+| `filterCompletedTodayMeetings` / `isCompletedTodayMeeting` | completed-today history membership                                                    |
+| `truncateMiddle` / `MEETING_TITLE_DISPLAY_MAX_CHARS`       | title display middle-truncate (25)                                                    |
+| `graph.join.byId`                                          | explicit join use case + suppress pending auto-open                                   |
+| `isCalendarOk` / `isCalendarAutomationEligible`            | ok narrowing; automation gate (live complete only)                                    |
+| `DarwinPartialRefreshDiagnostics`                          | six-count aggregate for Darwin live partial results                                   |
+| `googleHttpRequest` / `refreshGoogleAccessToken`           | bounded Google transport; force/if-needed refresh                                     |
+| `loadGoogleSyncTokens` / `saveGoogleSyncTokens`            | encrypted Google nextSyncToken map                                                    |
+| `eventRecordIdentifier` (Swift)                            | occurrence-aware EventKit uid (`id:bitPattern`)                                       |
+| `readSwiftSource` / `COMPILED_SWIFT_SOURCE_PATH`           | dual-source concat for compile + `source.hash`                                        |
+| `graph.opener`                                             | allowlisted egress adapter shared by scheduler and join                               |
+| `formatOfflineCacheAgeLabel`                               | tray offline age from `cacheAgeMs`                                                    |
+| `ensureSecureDir` / `writeSecureFile`                      | owner-only modes for secret/cache paths                                               |
 
 ## CONVENTIONS
 
@@ -147,8 +147,8 @@ Skip generated/cache outputs: `lib/`, `dist/`, `coverage/`, `node_modules/`, `.e
 - **Darwin tray diagnostics:** only the native macOS tray renders the partial warning and diagnostic rows, all disabled. Its menu signature includes every diagnostic count so changed diagnostics rebuild the menu. Google and Windows use the generic partial state without Darwin diagnostic rows.
 - Renderer production has no diagnostics UI. It renders retained partial events or the ordinary no-events state, never tray warning text, diagnostic labels, or diagnostic tokens.
 - `CalendarPort.getEvents(signal: AbortSignal)` — providers must honor cancel.
-- Meeting URL allowlisting at egress only (`openMeetingUrl` / ShellMeetingOpener / `joinMeetingById`).
-- All user join paths call `joinMeetingById` / `graph.join.byId`.
+- Meeting URL allowlisting at egress only through `ShellMeetingOpener`, exposed as `graph.opener`.
+- All user join paths call `graph.join.byId`.
 - Tray menu: `setContextMenu()` before first activation; Windows left-click `popUpContextMenu`.
 - User strings in renderer HTML go through `escapeHtml()`.
 

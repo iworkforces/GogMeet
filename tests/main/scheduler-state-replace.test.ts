@@ -1,154 +1,140 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserWindow } from "electron";
-import type { CalendarResult } from "../../src/domain/entities/calendar-result.js";
-import { asTestEventId } from "../helpers/test-utils.js";
+import { createSchedulerFacade } from "../../src/main/scheduler/facade.js";
+import {
+  clearSchedulerResources,
+  createSchedulerState,
+} from "../../src/main/scheduler/state/index.js";
+import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
+import { asTestEventId, okCalendarResult } from "../helpers/test-utils.js";
 
-vi.mock("electron", () => ({
-  app: { getPath: vi.fn().mockReturnValue("/tmp/test-user-data") },
-  shell: { openExternal: vi.fn().mockResolvedValue(undefined) },
-}));
+describe("scheduler state replacement contracts", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
 
-const stateModule = await import("../../src/main/scheduler/state/index.js");
-const { createSchedulerState, replaceState, clearSchedulerResources } = stateModule;
-
-describe("replaceState() preservation", () => {
-  beforeEach(() => {
-    // Fully reset module state before each test
-    replaceState(createSchedulerState());
-    stateModule.state.win = null;
-    stateModule.state.onTrayTitleUpdate = null;
-    stateModule.state.powerCallbacks = null;
-    stateModule.state.lastKnownEvents = null;
-  });
-
-  it("preserves win, onTrayTitleUpdate, powerCallbacks, and lastKnownEvents from old state", () => {
-    const fakeWin = { id: 42 }.As<BrowserWindow>();
-    const fakeCallback = vi.fn();
-    const fakePower = {
+  it("preserves window, title, and power callback identity across restart", () => {
+    const context = schedulerTestContext();
+    const facade = createSchedulerFacade(context.dependencies);
+    const window = { id: 42 }.As<BrowserWindow>();
+    const title = vi.fn();
+    const power = {
       getPollInterval: () => 60_000,
       preventSleep: vi.fn(),
       allowSleep: vi.fn(),
     };
-    const fakeEvents: CalendarResult = { kind: "ok", source: "live", completeness: "complete", observedAt: Date.now(), events: [] };
+    facade.setWindow(window);
+    facade.setTrayTitleCallback(title);
+    facade.initPowerCallbacks(power);
 
-    stateModule.state.win = fakeWin;
-    stateModule.state.onTrayTitleUpdate = fakeCallback;
-    stateModule.state.powerCallbacks = fakePower;
-    stateModule.state.lastKnownEvents = fakeEvents;
+    facade.restart();
+    facade.stop();
 
-    const next = createSchedulerState();
-    // Sanity: next defaults are blank
-    expect(next.win).toBeNull();
-    expect(next.lastKnownEvents).toBeNull();
-
-    replaceState(next);
-
-    expect(stateModule.state.win).toBe(fakeWin);
-    expect(stateModule.state.onTrayTitleUpdate).toBe(fakeCallback);
-    expect(stateModule.state.powerCallbacks).toBe(fakePower);
-    expect(stateModule.state.lastKnownEvents).toBe(fakeEvents);
+    expect(title).toHaveBeenCalledWith(null);
+    expect(context.cancelRefresh).toHaveBeenCalledTimes(2);
   });
 
-  it("clears old timer handles even when preserving refs", () => {
-    const cleared: Array<Parameters<typeof globalThis.clearTimeout>[0]> = [];
-    const realClearTimeout = globalThis.clearTimeout;
-    const spy = vi
-      .spyOn(globalThis, "clearTimeout")
-      .mockImplementation((h: Parameters<typeof realClearTimeout>[0]) => {
-        if (h !== undefined) cleared.push(h);
-        realClearTimeout(h);
-      });
+  it("preserves lastKnownEvents across stop and restart", async () => {
+    const result = okCalendarResult();
+    const context = schedulerTestContext(undefined, {
+      publicationGeneration: 7,
+      result,
+    });
+    const facade = createSchedulerFacade(context.dependencies);
+    await facade.forcePoll({ reason: "user" });
 
-    const handle = setTimeout(() => {}, 1_000_000);
-    stateModule.state.pollTimeout = handle;
-    const lastKnown = {
-      kind: "ok" as const,
-      source: "live" as const,
-      completeness: "complete" as const,
-      observedAt: Date.now(),
-      events: [],
-    };
-    stateModule.state.lastKnownEvents = lastKnown;
-
-    replaceState(createSchedulerState());
-
-    expect(cleared).toContain(handle);
-    // Preserved across the swap (same reference / values; pin observedAt once)
-    expect(stateModule.state.lastKnownEvents).toEqual(lastKnown);
-    // pollTimeout is reset on the new state
-    expect(stateModule.state.pollTimeout).toBeNull();
-
-    spy.mockRestore();
-  });
-});
-
-describe("clearSchedulerResources() sleep-prevention release", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+    facade.stop();
+    expect(facade.getLastKnownEvents()).toBe(result);
+    facade.restart();
+    await vi.runAllTicks();
+    expect(facade.getLastKnownEvents()).toBe(result);
+    facade.stop();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+  it("clears old poll handles while retaining cached events", () => {
+    const state = createSchedulerState();
+    const handle = setTimeout(() => {}, 60_000);
+    const events = okCalendarResult();
+    state.pollTimeout = handle;
+    state.lastKnownEvents = events;
 
-  it("releases one sleep blocker per countdown interval on bulk reset", () => {
-    const allowSleep = vi.fn();
-    const s = createSchedulerState();
-    s.powerCallbacks = {
-      getPollInterval: () => 120_000,
-      preventSleep: vi.fn(),
-      allowSleep,
-    };
-    s.countdownIntervals.set(asTestEventId("bulk-countdown-a"), setInterval(() => {}, 60_000));
-    s.countdownIntervals.set(asTestEventId("bulk-countdown-b"), setInterval(() => {}, 60_000));
+    clearSchedulerResources(state, { preserveLastKnownEvents: true });
 
-    clearSchedulerResources(s);
-
-    expect(allowSleep).toHaveBeenCalledTimes(2);
-    expect(s.countdownIntervals.size).toBe(0);
-  });
-
-  it("does not release sleep when only clear timers are bulk reset", () => {
-    const allowSleep = vi.fn();
-    const s = createSchedulerState();
-    s.powerCallbacks = {
-      getPollInterval: () => 120_000,
-      preventSleep: vi.fn(),
-      allowSleep,
-    };
-    s.clearTimers.set(asTestEventId("clear-only"), setTimeout(() => {}, 60_000));
-
-    clearSchedulerResources(s);
-
-    expect(allowSleep).not.toHaveBeenCalled();
-    expect(s.clearTimers.size).toBe(0);
+    expect(state.pollTimeout).toBeNull();
+    expect(state.lastKnownEvents).toBe(events);
   });
 
   it("clears countdown intervals without power callbacks", () => {
-    const s = createSchedulerState();
-    s.powerCallbacks = null;
-    s.countdownIntervals.set(asTestEventId("no-power-callbacks"), setInterval(() => {}, 60_000));
+    const state = createSchedulerState();
+    state.powerCallbacks = null;
+    state.countdownIntervals.set(
+      asTestEventId("countdown"),
+      setInterval(() => {}, 60_000),
+    );
 
-    expect(() => clearSchedulerResources(s)).not.toThrow();
-    expect(s.countdownIntervals.size).toBe(0);
+    expect(() => clearSchedulerResources(state)).not.toThrow();
+    expect(state.countdownIntervals.size).toBe(0);
   });
 
-  it("releases countdown sleep blockers when preserving fired state", () => {
+  it("releases one sleep blocker per countdown interval on bulk reset", () => {
+    const state = createSchedulerState();
     const allowSleep = vi.fn();
-    const s = createSchedulerState();
-    s.powerCallbacks = {
+    state.powerCallbacks = {
       getPollInterval: () => 120_000,
       preventSleep: vi.fn(),
       allowSleep,
     };
-    const eventId = asTestEventId("preserve-fired-countdown");
-    s.countdownIntervals.set(eventId, setInterval(() => {}, 60_000));
-    s.firedEvents.set(eventId, 123);
+    state.countdownIntervals.set(
+      asTestEventId("a"),
+      setInterval(() => {}, 60_000),
+    );
+    state.countdownIntervals.set(
+      asTestEventId("b"),
+      setInterval(() => {}, 60_000),
+    );
 
-    clearSchedulerResources(s, { preserveFiredState: true });
+    clearSchedulerResources(state);
 
-    expect(allowSleep).toHaveBeenCalledTimes(1);
-    expect(s.countdownIntervals.size).toBe(0);
-    expect(s.firedEvents.get(eventId)).toBe(123);
+    expect(allowSleep).toHaveBeenCalledTimes(2);
+    expect(state.countdownIntervals.size).toBe(0);
+  });
+
+  it("does not release sleep for clear timers", () => {
+    const state = createSchedulerState();
+    const allowSleep = vi.fn();
+    state.powerCallbacks = {
+      getPollInterval: () => 120_000,
+      preventSleep: vi.fn(),
+      allowSleep,
+    };
+    state.clearTimers.set(
+      asTestEventId("clear"),
+      setTimeout(() => {}, 60_000),
+    );
+
+    clearSchedulerResources(state);
+
+    expect(allowSleep).not.toHaveBeenCalled();
+    expect(state.clearTimers.size).toBe(0);
+  });
+
+  it("preserves fired suppression while clearing countdown resources", () => {
+    const state = createSchedulerState();
+    const id = asTestEventId("fired");
+    const allowSleep = vi.fn();
+    state.powerCallbacks = {
+      getPollInterval: () => 120_000,
+      preventSleep: vi.fn(),
+      allowSleep,
+    };
+    state.countdownIntervals.set(
+      id,
+      setInterval(() => {}, 60_000),
+    );
+    state.firedEvents.set(id, 123);
+
+    clearSchedulerResources(state, { preserveFiredState: true });
+
+    expect(allowSleep).toHaveBeenCalledOnce();
+    expect(state.firedEvents.get(id)).toBe(123);
   });
 });

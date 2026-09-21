@@ -1,25 +1,19 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createMockSettings } from "../helpers/test-utils.js";
 import { existsSync, readFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
+import { createSettingsFacade, type SettingsFacade } from "../../src/main/facades/settings.js";
 
 // vi.mock is hoisted above all code, so the path must be a literal string in the mock factory
 vi.mock("electron", () => ({
   app: {
     getPath: vi.fn().mockReturnValue("/tmp/gogmeet-settings-test"),
   },
-    }));
+}));
 
 // Define the same path for use in tests
 const MOCK_USER_DATA_PATH = "/tmp/gogmeet-settings-test";
 
-// Import after mocking
-  import {
-  loadSettings,
-  saveSettings,
-  getSettings,
-  updateSettings,
-} from "../../src/main/facades/settings.js";
 import {
   DEFAULT_SETTINGS,
   OPEN_BEFORE_MINUTES_MIN,
@@ -27,6 +21,7 @@ import {
 } from "../../src/domain/entities/settings.js";
 describe("settings", () => {
   const settingsPath = join(MOCK_USER_DATA_PATH, "settings.json");
+  let settings: SettingsFacade;
 
   beforeEach(async () => {
     // Reset mocks
@@ -38,8 +33,8 @@ describe("settings", () => {
     }
     mkdirSync(MOCK_USER_DATA_PATH, { recursive: true });
 
-    // Reset the settings cache by reloading
-    await loadSettings();
+    settings = createSettingsFacade();
+    await settings.load();
   });
 
   describe("loadSettings", () => {
@@ -49,7 +44,7 @@ describe("settings", () => {
         rmSync(settingsPath);
       }
 
-      const result = await loadSettings();
+      const result = await settings.load();
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -68,7 +63,7 @@ describe("settings", () => {
       const fs = require("fs");
       fs.writeFileSync(settingsPath, JSON.stringify(expectedSettings));
 
-      const result = await loadSettings();
+      const result = await settings.load();
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -83,14 +78,14 @@ describe("settings", () => {
       const fs = require("fs");
       fs.writeFileSync(settingsPath, "{ not valid json }");
 
-      const result = await loadSettings();
+      const result = await settings.load();
 
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error).toMatch(/Failed to parse settings JSON/);
 
       // Cache should fall back to defaults
-      expect(getSettings()).toEqual(DEFAULT_SETTINGS);
+      expect(settings.get()).toEqual(DEFAULT_SETTINGS);
     });
   });
 
@@ -104,7 +99,7 @@ describe("settings", () => {
         schemaVersion: 1,
       };
 
-      await saveSettings(settingsToSave);
+      await settings.save(createMockSettings(settingsToSave));
 
       // Verify file was created and contains correct data
       expect(existsSync(settingsPath)).toBe(true);
@@ -115,24 +110,32 @@ describe("settings", () => {
       expect(saved.openBeforeMinutes).toBe(4);
       expect(saved.launchAtLogin).toBe(true);
       expect(saved.showTomorrowMeetings).toBe(true);
-  });
+    });
     it("returns cached copy", async () => {
       // Load to populate cache
-      await loadSettings();
+      await settings.load();
 
-      const settings = getSettings();
+      const cachedSettings = settings.get();
 
-      expect(settings).toEqual(DEFAULT_SETTINGS);
+      expect(cachedSettings).toEqual(DEFAULT_SETTINGS);
     });
   });
 
   describe("updateSettings", () => {
     it("merges partial, saves, and returns full settings", async () => {
       // First, save initial settings
-      await saveSettings(createMockSettings({ openBeforeMinutes: 2, launchAtLogin: false, showTomorrowMeetings: true, windowAlert: true, schemaVersion: 1 }));
+      await settings.save(
+        createMockSettings({
+          openBeforeMinutes: 2,
+          launchAtLogin: false,
+          showTomorrowMeetings: true,
+          windowAlert: true,
+          schemaVersion: 1,
+        }),
+      );
 
       // Now update with partial
-      const result = await updateSettings({ openBeforeMinutes: 4 });
+      const result = await settings.update({ openBeforeMinutes: 4 });
 
       expect(result.openBeforeMinutes).toBe(4);
       expect(result.launchAtLogin).toBe(false);
@@ -146,27 +149,25 @@ describe("settings", () => {
       expect(saved.showTomorrowMeetings).toBe(true);
 
       // Verify cache was updated
-      const cached = getSettings();
+      const cached = settings.get();
       expect(cached.openBeforeMinutes).toBe(4);
     });
 
     it("clamps openBeforeMinutes to 0-10 range (value below min -> 0)", async () => {
-      const result = await updateSettings({ openBeforeMinutes: -5 });
+      const result = await settings.update({ openBeforeMinutes: -5 });
 
       expect(result.openBeforeMinutes).toBe(OPEN_BEFORE_MINUTES_MIN);
     });
 
     it("clamps openBeforeMinutes to 0-10 range (value above max -> 10)", async () => {
-      const result = await updateSettings({ openBeforeMinutes: 99 });
+      const result = await settings.update({ openBeforeMinutes: 99 });
 
       expect(result.openBeforeMinutes).toBe(OPEN_BEFORE_MINUTES_MAX);
     });
 
     it("ignores unknown properties in partial", async () => {
       // TypeScript would catch this at compile time, but runtime test too
-      const initial = getSettings();
-
-      const result = await updateSettings({
+      const result = await settings.update({
         openBeforeMinutes: 3,
       });
 
@@ -177,10 +178,18 @@ describe("settings", () => {
 
     it("updates launchAtLogin correctly", async () => {
       // Start with default (false)
-      await saveSettings(createMockSettings({ openBeforeMinutes: 1, launchAtLogin: false, showTomorrowMeetings: true, windowAlert: true, schemaVersion: 1 }));
+      await settings.save(
+        createMockSettings({
+          openBeforeMinutes: 1,
+          launchAtLogin: false,
+          showTomorrowMeetings: true,
+          windowAlert: true,
+          schemaVersion: 1,
+        }),
+      );
 
       // Enable launch at login
-      const result = await updateSettings({ launchAtLogin: true });
+      const result = await settings.update({ launchAtLogin: true });
 
       expect(result.launchAtLogin).toBe(true);
 
@@ -190,7 +199,7 @@ describe("settings", () => {
       expect(saved.launchAtLogin).toBe(true);
 
       // Disable again
-      const result2 = await updateSettings({ launchAtLogin: false });
+      const result2 = await settings.update({ launchAtLogin: false });
       expect(result2.launchAtLogin).toBe(false);
     });
 
@@ -199,7 +208,7 @@ describe("settings", () => {
       const fs = require("fs");
       fs.writeFileSync(settingsPath, JSON.stringify({ openBeforeMinutes: 2 }));
 
-      const result = await loadSettings();
+      const result = await settings.load();
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;

@@ -56,27 +56,27 @@ Success is **exhaustive** (no optional provenance for callers to guess):
 
 ## FILES (services / policies)
 
-| File                             | Role                                                                                                                                                     |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| File                             | Role                                                                                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `policies/meet-url-allowlist.ts` | HTTPS host allowlist + `isAllowedMeetHostname` (Meet, calendar/accounts.google.com, Zoom / `.zoom.us`, Teams, Webex / `.webex.com`, Calendly) |
-| `services/url-validation.ts`     | `validateMeetUrl` / `isAllowedMeetUrl`                                                                                                                   |
-| `services/build-meet-url.ts`     | pure join URL + Meet `authuser` / Zoom `uname`                                                                                                           |
-| `services/url-extract.ts`        | free-text Zoom → Meet → Teams → Webex → Calendly; HTML `href=` + scheme-less bare hosts                                                                  |
-| `services/clean-description.ts`  | notes cleaner for EventKit/Google                                                                                                                        |
-| `services/pick-join-target.ts`   | next joinable meeting                                                                                                                                    |
-| `services/meeting-time.ts`       | in-progress / not-ended / upcoming filter / **completed-today** / display horizon                                                                        |
-| `services/truncate-middle.ts`    | code-point middle-truncate; `MEETING_TITLE_DISPLAY_MAX_CHARS` (25) for meeting titles                                                                    |
-| `services/platform.ts`           | Meet vs Zoom host detection (**not** OS)                                                                                                                 |
-| `services/time.ts`               | day boundaries + remaining-time format                                                                                                                   |
-| `services/settings-parse.ts`     | clamp + rewrite `schemaVersion` to **v3**; legacy `fullScreenAlert` → `windowAlert`; default missing booleans                                            |
-| `services/event-signature.ts`    | stable event/list signatures for push gating                                                                                                             |
+| `services/url-validation.ts`     | `validateMeetUrl` / `isAllowedMeetUrl`                                                                                                        |
+| `services/build-meet-url.ts`     | pure join URL + Meet `authuser` / Zoom `uname`                                                                                                |
+| `services/url-extract.ts`        | free-text Zoom → Meet → Teams → Webex → Calendly; HTML `href=` + scheme-less bare hosts                                                       |
+| `services/clean-description.ts`  | notes cleaner for EventKit/Google                                                                                                             |
+| `services/pick-join-target.ts`   | next joinable meeting                                                                                                                         |
+| `services/meeting-time.ts`       | in-progress / not-ended / upcoming filter / **completed-today** / display horizon                                                             |
+| `services/truncate-middle.ts`    | code-point middle-truncate; `MEETING_TITLE_DISPLAY_MAX_CHARS` (25) for meeting titles                                                         |
+| `services/platform.ts`           | Meet vs Zoom host detection (**not** OS)                                                                                                      |
+| `services/time.ts`               | day boundaries + remaining-time format                                                                                                        |
+| `services/settings-parse.ts`     | clamp + rewrite `schemaVersion` to **v3**; legacy `fullScreenAlert` → `windowAlert`; default missing booleans                                 |
+| `services/event-signature.ts`    | stable event/list signatures for push gating                                                                                                  |
 
 ## RULES
 
 - Import only other `src/domain/**` modules.
 - Callers: `src/shared` (IPC maps), main/preload/renderer, tests.
 - **No** barrels and **no** re-exports from old `shared/*` or `main/utils` paths.
-- Opening meeting URLs (`shell.openExternal`) stays in infrastructure / `main/utils/meet-url.ts`.
+- Opening meeting URLs (`shell.openExternal`) stays in `main/infrastructure/electron/shell-meeting-opener.ts`.
 - Prefer constructors/helpers over ad-hoc result object literals.
 
 ## WHERE TO LOOK

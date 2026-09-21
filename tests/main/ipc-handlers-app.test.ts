@@ -1,29 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-
-const { mockOpenMeetingUrl, mockJoinMeetingById } = vi.hoisted(() => ({
-  mockOpenMeetingUrl: vi.fn(),
-  mockJoinMeetingById: vi.fn(),
-}));
-
-vi.mock("../../src/main/utils/meet-url.js", () => ({
-  openMeetingUrl: mockOpenMeetingUrl,
-}));
-
-vi.mock("../../src/main/utils/join-meeting.js", () => ({
-  joinMeetingById: mockJoinMeetingById,
-}));
-
 import { registerAppHandlers } from "../../src/main/ipc-handlers/app.js";
 import { ipcMain, app } from "electron";
 import { authorizedInvokeEvent } from "../helpers/ipc-sender.js";
 import { testAppGraph } from "../helpers/app-graph.js";
+
+const mockOpenMeetingUrl = vi.fn();
+const mockJoinMeetingById = vi.fn();
 
 const mockIpcMain = vi.mocked(ipcMain);
 const mockApp = vi.mocked(app);
 
 function getRegisteredHandler(channel: string) {
   const call = mockIpcMain.handle.mock.calls.find((c) => c[0] === channel);
-  return call?.[1];
+  const handler = call?.[1];
+  if (!handler) throw new TypeError(`IPC handler was not registered: ${channel}`);
+  return handler;
 }
 
 const unauthorizedEvent = {
@@ -31,7 +22,6 @@ const unauthorizedEvent = {
 }.As<import("electron").IpcMainInvokeEvent>();
 
 const authorizedEvent = authorizedInvokeEvent("index").As<import("electron").IpcMainInvokeEvent>();
-
 
 function appGraphForTest() {
   return testAppGraph({
@@ -58,7 +48,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:open-external");
 
-      const result = await handler!(authorizedEvent, {
+      const result = await handler(authorizedEvent, {
         url: "https://meet.google.com/abc-def-ghi",
       });
       expect(mockOpenMeetingUrl).toHaveBeenCalledWith("https://meet.google.com/abc-def-ghi");
@@ -69,7 +59,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:open-external");
 
-      const result = await handler!(authorizedEvent, { url: "http://meet.google.com/abc" });
+      const result = await handler(authorizedEvent, { url: "http://meet.google.com/abc" });
       expect(mockOpenMeetingUrl).not.toHaveBeenCalled();
       expect(result).toMatchObject({ ok: false });
     });
@@ -78,7 +68,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:open-external");
 
-      const result = await handler!(authorizedEvent, { url: 123 });
+      const result = await handler(authorizedEvent, { url: 123 });
       expect(mockOpenMeetingUrl).not.toHaveBeenCalled();
       expect(result).toEqual({ ok: false, error: "Invalid URL payload" });
     });
@@ -87,7 +77,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:open-external");
 
-      const result = await handler!(unauthorizedEvent, {
+      const result = await handler(unauthorizedEvent, {
         url: "https://meet.google.com/abc-def-ghi",
       });
       expect(mockOpenMeetingUrl).not.toHaveBeenCalled();
@@ -100,7 +90,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:join-meeting");
 
-      const result = await handler!(authorizedEvent, { id: "evt-1" });
+      const result = await handler(authorizedEvent, { id: "evt-1" });
       expect(mockJoinMeetingById).toHaveBeenCalledWith("evt-1");
       expect(result).toEqual({ ok: true, value: undefined });
     });
@@ -109,7 +99,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:join-meeting");
 
-      const result = await handler!(unauthorizedEvent, { id: "evt-1" });
+      const result = await handler(unauthorizedEvent, { id: "evt-1" });
       expect(mockJoinMeetingById).not.toHaveBeenCalled();
       expect(result).toEqual({ ok: false, error: "Unauthorized" });
     });
@@ -118,7 +108,7 @@ describe("registerAppHandlers", () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:join-meeting");
 
-      const result = await handler!(authorizedEvent, { id: "  " });
+      const result = await handler(authorizedEvent, { id: "  " });
       expect(mockJoinMeetingById).not.toHaveBeenCalled();
       expect(result).toMatchObject({ ok: false });
     });
@@ -129,13 +119,13 @@ describe("registerAppHandlers", () => {
       mockApp.getVersion.mockReturnValue("1.6.1");
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:get-version");
-      expect(await handler!(authorizedEvent)).toBe("1.6.1");
+      expect(await handler(authorizedEvent)).toBe("1.6.1");
     });
 
     it("returns empty string for unauthorized sender", async () => {
       registerAppHandlers(appGraphForTest());
       const handler = getRegisteredHandler("app:get-version");
-      expect(await handler!(unauthorizedEvent)).toBe("");
+      expect(await handler(unauthorizedEvent)).toBe("");
     });
   });
 });

@@ -8,9 +8,7 @@
 | --------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `browser-window.ts`         | BrowserWindow config factory, CSP enforcement (incl. base-uri/object/frame/form)       | `SECURE_WEB_PREFERENCES`, `getPreloadPath()`, `loadWindowContent()`, `setupCspHeaders()`                                                        |
 | `window-chrome.ts`          | Platform chrome + dialog canvas `#0d1117` + alert always-on-top                        | `DIALOG_BACKGROUND_COLOR`, `platformWindowChrome()`, `windowsSolidBackgroundColor()`, `bindWindowsThemeBackground()`, `applyAlertAlwaysOnTop()` |
-| `meet-url.ts`               | Composition-bound allowlisted open (default ShellMeetingOpener)                        | `openMeetingUrl()`, `bindMeetingOpener()`, `rebindMeetingOpenerDefaults()`                                                                      |
 | `secure-fs.ts`              | Owner-only dir/file modes for secret and cache paths                                   | `ensureSecureDir()`, `writeSecureFile()`, `SECURE_DIR_MODE` / `SECURE_FILE_MODE`                                                                |
-| `join-meeting.ts`           | Join hub free function (default-bound use case)                                        | `joinMeetingById()`, `bindJoinMeeting()`, `rebindJoinMeetingDefaults()`                                                                         |
 | `packageInfo.ts`            | Lazy-load + cache `package.json`                                                       | `getPackageInfo()`, `PackageInfo`, `clearPackageInfoCache`, `isPackageInfoLoaded`                                                               |
 | `log.ts`                    | electron-log bootstrap + scopes                                                        | `configureMainLogging()`, `mainLog`, `schedulerLog`, `calendarLog`                                                                              |
 | `system-settings.ts`        | Open OS settings (non-meeting egress)                                                  | `openSystemSettings()`                                                                                                                          |
@@ -42,13 +40,14 @@
 | buildMeetUrl / detectPlatform             | `domain/services/build-meet-url.ts`, `platform.ts`                           |
 | URL extract / clean description           | `domain/services/url-extract.ts`, `clean-description.ts`                     |
 | Shell opener factory                      | `infrastructure/electron/shell-meeting-opener.ts`                            |
+| Explicit join use case                    | `application/use-cases/join-meeting.ts`, exposed as `graph.join.byId`        |
 | Unchecked casts                           | `shared/utils/as.ts`                                                         |
 | Brand-icon aurora (About/Settings/Update) | `shared/utils/app-icon-aurora.ts`                                            |
 
 ## RULES
 
-- Before meeting URL egress, use `openMeetingUrl()` / `joinMeetingById` / graph surfaces.
-- Join paths must use `joinMeetingById` (not raw unenriched openExternal).
+- Before meeting URL egress, use `graph.opener` or `graph.join.byId`.
+- Join paths must use `graph.join.byId` rather than raw unenriched `openExternal`.
 - Do not re-export domain or infrastructure modules from this package.
-- Prefer graph.opener / `bindMeetingOpener` from composition; `openMeetingUrl` delegates to the bound port (scheduler auto-open and join share that instance after `createAppGraph`).
+- `createAppGraph(overrides?: AppGraphOverrides)` owns one graph-local opener. It exposes it as `graph.opener` and injects the same object into scheduler auto-open and the join use case.
 - Do not leave default-on tracing or secret-bearing metadata in product paths.

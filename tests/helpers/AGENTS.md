@@ -29,7 +29,7 @@ import { testAppGraph } from "../helpers/app-graph.js";
 | `isoFromNow`                                                      | ISO-8601 UTC offset from now                                                                                                      |
 | `asTestEventId` / `asTestIsoUtc` / `asTestMeetUrl`                | Throw-on-invalid wrappers around domain brand validators                                                                          |
 | `okCalendarResult`                                                | Live-complete `CalendarResult` fixture (exhaustive provenance fields)                                                             |
-| `testAppGraph`                                                    | Minimal production-shaped `AppGraph` with optional surface overrides (`skipBind`, calendar/settings/join/scheduler/watcher)       |
+| `testAppGraph`                                                    | Minimal production-shaped `AppGraph` with optional `AppGraphOverrides`                                                            |
 
 ## CONTRACTS
 
@@ -37,7 +37,7 @@ import { testAppGraph } from "../helpers/app-graph.js";
 - Brands import from **`src/domain/entities/brand.js`** (not shared).
 - **Defaults are time-relative.** Combine with fake timers for deterministic windows.
 - **No Electron at import time** in `test-utils.ts` (type-only electron imports). `ipc-sender` and graph helpers may touch mocked Electron in main tests.
-- Prefer `testAppGraph({ skipBind: true, ... })` patterns that match `createTestAppGraph` options when suites mock facades.
+- `testAppGraph(overrides: AppGraphOverrides = {})` directly delegates to `createTestAppGraph(overrides)`, which directly delegates to `createAppGraph(overrides)`.
 
 ## LEGACY FACTORIES
 

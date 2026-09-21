@@ -2,16 +2,16 @@
 
 ## Overview
 
-Facades provide the main-process application surface for calendar access, calendar watching, last-poll status, and persistent settings. They are not pure domain code. Production callers usually use `AppGraph`; facade free functions support internal consumers and default binding.
+Facades provide the main-process application surface for calendar access, calendar watching, last-poll status, and persistent settings. They are not pure domain code. Production callers usually use `AppGraph`; factories return owner-local instances with their own state and dependencies.
 
 ## Files
 
-| File                  | Exports                                                                                                                | Purpose                                                                                                                                                   |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `calendar.ts`         | refresh, result, latest-publication, cancellation, permission, disconnect, warmup, UI, poll-error, and binding helpers | Lazily resolves provider ports, owns calendar UI snapshot and permission cache, binds `GetMeetings` into the coordinator, and publishes snapshot changes. |
-| `calendar-watcher.ts` | start, stop, revive watcher                                                                                            | Connects provider watch support to coalesced scheduler poll requests.                                                                                     |
-| `calendar-status.ts`  | `recordCalendarResult`, `getLastCalendarStatus`                                                                        | Stores reduced tray status: `unknown`, successful timestamp, or error code and message.                                                                   |
-| `settings.ts`         | load, save, get, update, and binding helpers                                                                           | Settings surface over `JsonSettingsStore`; port methods are load, get, and update, while save is adapter-specific.                                        |
+| File                  | Exports                                         | Purpose                                                                                                                                                                             |
+| --------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `calendar.ts`         | `createCalendarFacade()`                        | Returns an instance that lazily resolves provider ports, owns calendar UI snapshot and permission cache, connects `GetMeetings` to the coordinator, and publishes snapshot changes. |
+| `calendar-watcher.ts` | `createCalendarWatcher()`                       | Returns an instance with owner-local watcher state and an injected coalesced scheduler poll request.                                                                                |
+| `calendar-status.ts`  | `recordCalendarResult`, `getLastCalendarStatus` | Stores reduced tray status: `unknown`, successful timestamp, or error code and message.                                                                                             |
+| `settings.ts`         | `createSettingsFacade()`                        | Returns an instance over `JsonSettingsStore`; port methods are load, get, and update, while save is adapter-specific.                                                               |
 
 ## Calendar snapshot and publication
 
@@ -28,7 +28,7 @@ Facades provide the main-process application surface for calendar access, calend
 - Provider implementation belongs in `../calendar/`: Darwin EventKit, Google Calendar, Google HTTP, OAuth and sync-token storage, offline cache, and coordinator.
 - `calendar-watcher.ts` uses `getCalendarPort()` and requests `forcePoll({ reason: "watch" })`. Providers without `startWatch` remain poll-only.
 - Calendar status intentionally has no source, completeness, event, cache-age, or diagnostic data. Menu presentation combines it with the full calendar UI snapshot when needed.
-- Invalidate the calendar permission cache before scheduler restart after resume. Lifecycle may auto-request only on Darwin; Windows Connect remains a tray or Settings action.
+- Invalidate the calendar permission cache before the graph-local power `forcePoll` after resume. Lifecycle may auto-request only on Darwin; Windows Connect remains a tray or Settings action.
 
 ## Settings rules
 
