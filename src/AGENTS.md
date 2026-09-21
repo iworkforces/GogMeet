@@ -18,10 +18,10 @@ Application source is split by Electron process and Clean Architecture layers. K
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `domain/`                            | Pure entities, policies, services. See `domain/AGENTS.md`.                                                                                                                                                                             |
 | `shared/`                            | IPC maps + thin DTOs + `utils/as.ts` + `escape-html` + `app-icon-aurora`. See `shared/AGENTS.md`.                                                                                                                                      |
-| `main/composition/`                  | `createAppGraph`, `bindComposition`, `createTestAppGraph`.                                                                                                                                                                             |
+| `main/composition/`                  | `createAppGraph`, `createTestAppGraph`, and graph-local dependency wiring.                                                                                                                                                             |
 | `main/application/`                  | Ports + use cases (no Electron).                                                                                                                                                                                                       |
 | `main/infrastructure/`               | Driven adapters: JsonSettingsStore, ShellMeetingOpener.                                                                                                                                                                                |
-| `main/facades/`                      | Calendar, watcher, status, settings free-function surface + default binds.                                                                                                                                                             |
+| `main/facades/`                      | Calendar, watcher, status, and settings instance factories.                                                                                                                                                                            |
 | `main/calendar/`                     | Provider factory (probe preflight first), Darwin/Google/fixture/**performance-probe**, **google-http**, auth (OAuth + tokens + **sync tokens**), offline cache, **refresh-coordinator**.                                               |
 | `main/scheduler/`                    | Facade + pure `planSchedule` + interpret adapters.                                                                                                                                                                                     |
 | `main/ipc-handlers/`                 | Typed IPC; handlers receive `AppGraph`.                                                                                                                                                                                                |
@@ -30,7 +30,7 @@ Application source is split by Electron process and Clean Architecture layers. K
 | `main/index.ts`                      | Single-instance bootstrap; popover BrowserWindow **360×480**.                                                                                                                                                                          |
 | `main/system/`                       | Power, display-horizon, shortcuts, auto-launch, auto-updater, notifications.                                                                                                                                                           |
 | `main/windows/`                      | About (320×360, aurora, no Close), Update (340×340–400, aurora), alert, settings (Dock + hide-cache) BrowserWindows.                                                                                                                   |
-| `main/utils/`                        | CSP/window helpers, join hub, meet-url, **performance-trace**, logging.                                                                                                                                                                |
+| `main/utils/`                        | CSP/window helpers, **performance-trace**, logging, and system settings.                                                                                                                                                               |
 | `main/platform/`                     | OS predicates (`isDarwin` / `isWin32`).                                                                                                                                                                                                |
 | `main/swift/`                        | EventKit helper compile/run/JSON Lines + **swift-helper-process** + **event-occurrence-identity.swift** (Darwin leaf; dual-source hash/compile).                                                                                       |
 | `preload/`                           | `window.api` bridge.                                                                                                                                                                                                                   |
@@ -53,7 +53,7 @@ Application source is split by Electron process and Clean Architecture layers. K
 | Allowlist / validate          | `domain/policies/meet-url-allowlist.ts`, `domain/services/url-validation.ts`                                                               |
 | buildMeetUrl / platform host  | `domain/services/build-meet-url.ts`, `domain/services/platform.ts`                                                                         |
 | Wall-clock membership         | `domain/services/meeting-time.ts` (in-progress / upcoming / completed-today / horizon)                                                     |
-| Open / join meeting           | `infrastructure/electron/shell-meeting-opener.ts`, `utils/join-meeting.ts`                                                                 |
+| Open / join meeting           | `infrastructure/electron/shell-meeting-opener.ts`, `application/use-cases/join-meeting.ts`, `graph.join.byId`                              |
 | Settings schema + parse       | `domain/entities/settings.ts` (schema **v3**), `domain/services/settings-parse.ts`                                                         |
 | Settings persistence          | `infrastructure/settings/json-settings-store.ts` via `facades/settings.ts`                                                                 |
 | Scheduler                     | `main/scheduler/facade.ts` only from outside scheduler                                                                                     |
@@ -96,7 +96,7 @@ Add new meeting hosts after updating **both** extraction paths and allowlists:
 3. `domain/policies/meet-url-allowlist.ts` + preload hostname check.
 4. Tests under `tests/domain/` (extract, allowlist, buildMeetUrl) + main egress tests.
 
-Egress allowlisting remains in ShellMeetingOpener / `openMeetingUrl` / `joinMeetingById` / `APP_OPEN_EXTERNAL`.
+Meeting egress uses the allowlisted `ShellMeetingOpener` through `graph.opener`; explicit joins use `graph.join.byId`.
 
 ## Tests
 
