@@ -3,6 +3,8 @@ import type { EventId, IsoUtc } from "../../domain/entities/brand.js";
 import { asIsoUtc } from "../../domain/entities/brand.js";
 import { FIRED_EVENT_TTL_MS } from "./state/state-timers.js";
 import { showAlert } from "../windows/alert-window.js";
+import type { SchedulerRuntime } from "./runtime.js";
+import { cancelPendingBrowserOpenForState } from "./cancel-pending-browser-open.js";
 
 /** Default alert lead before browser open (overridden by settings). */
 const DEFAULT_ALERT_OFFSET_MS = 60 * 1000;
@@ -14,15 +16,15 @@ export const ALERT_OFFSET_MS: number = DEFAULT_ALERT_OFFSET_MS;
  * Fires `alertLeadMs` before the browser open to show a full-screen overlay.
  */
 export function scheduleAlertTimer(
+  runtime: SchedulerRuntime,
   event: MeetingEvent,
   effectiveDelay: number,
   endMs: number,
-  alertTimers: Map<EventId, ReturnType<typeof setTimeout>>,
-  alertFiredEvents: Map<EventId, number>,
   shouldAbort?: () => boolean,
   alertLeadMs: number = DEFAULT_ALERT_OFFSET_MS,
   openAtMs?: number,
 ): void {
+  const { alertTimers, alertFiredEvents } = runtime.state;
   cancelAlertTimer(event.id, alertTimers);
 
   const alertDelayMs = Math.max(0, effectiveDelay - alertLeadMs);
@@ -37,7 +39,7 @@ export function scheduleAlertTimer(
     alertTimers.delete(event.id);
     alertFiredEvents.set(event.id, endMs + FIRED_EVENT_TTL_MS);
     try {
-      showAlert(event, autoOpenAt);
+      showAlert(event, () => cancelPendingBrowserOpenForState(event.id, runtime.state), autoOpenAt);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[scheduler] Alert presentation failed:", message);
