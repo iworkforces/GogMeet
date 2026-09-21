@@ -1,3 +1,4 @@
+import { BrowserWindow } from "electron";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -161,14 +162,32 @@ describe("performance probe drivers", () => {
     }
   });
 
-  it("runTrayProbe sets up tray, emits bus events, and destroys tray", async () => {
-    const { runTrayProbe } = await import(
-      "../../src/main/app/performance-probes/tray-probe.js"
-    );
+  it("runTrayProbe sets up tray with its single local graph and destroys tray", async () => {
+    const localGraph = {
+      calendar: {},
+      settings: { get: () => ({ showTomorrowMeetings: true, showCompletedTodayMeetings: false }) },
+      scheduler: { start: vi.fn(), stop: vi.fn(), restart: vi.fn() },
+      watcher: { start: vi.fn(), stop: vi.fn(), revive: vi.fn() },
+      join: {},
+      opener: {},
+    };
+    mockCreateAppGraph.mockReturnValueOnce(localGraph);
+    const { runTrayProbe } = await import("../../src/main/app/performance-probes/tray-probe.js");
     // Shrink loops by mocking sizes path — driver still runs full sizes; keep timeout ok
     await runTrayProbe(userData);
-    expect(mockCreateAppGraph).toHaveBeenCalled();
-    expect(mockSetupTray).toHaveBeenCalled();
+    expect(mockCreateAppGraph).toHaveBeenCalledOnce();
+    expect(BrowserWindow).toHaveBeenCalledOnce();
+    expect(mockSetupTray).toHaveBeenCalledTimes(1);
+    expect(mockSetupTray).toHaveBeenCalledWith(
+      vi.mocked(BrowserWindow).mock.instances[0],
+      localGraph,
+    );
+    expect(localGraph.scheduler.start).not.toHaveBeenCalled();
+    expect(localGraph.scheduler.stop).not.toHaveBeenCalled();
+    expect(localGraph.scheduler.restart).not.toHaveBeenCalled();
+    expect(localGraph.watcher.start).not.toHaveBeenCalled();
+    expect(localGraph.watcher.stop).not.toHaveBeenCalled();
+    expect(localGraph.watcher.revive).not.toHaveBeenCalled();
     expect(mockMainBusEmit).toHaveBeenCalled();
     expect(mockRequestTrayRebuild).toHaveBeenCalled();
     expect(mockDestroyTray).toHaveBeenCalled();
@@ -176,9 +195,7 @@ describe("performance probe drivers", () => {
   }, 30_000);
 
   it("runAlertProbe presents synthetic alerts and force-destroys", async () => {
-    const { runAlertProbe } = await import(
-      "../../src/main/app/performance-probes/alert-probe.js"
-    );
+    const { runAlertProbe } = await import("../../src/main/app/performance-probes/alert-probe.js");
     await runAlertProbe(userData);
     expect(mockShowAlert.mock.calls.length).toBeGreaterThan(100);
     expect(mockDestroyAlert).toHaveBeenCalled();
@@ -186,9 +203,8 @@ describe("performance probe drivers", () => {
   }, 30_000);
 
   it("runSafeStorageProbe round-trips adapters and flushes", async () => {
-    const { runSafeStorageProbe } = await import(
-      "../../src/main/app/performance-probes/safe-storage-probe.js"
-    );
+    const { runSafeStorageProbe } =
+      await import("../../src/main/app/performance-probes/safe-storage-probe.js");
     // No enc files on disk → corrupt path skipped; cycles still run
     await runSafeStorageProbe(userData);
     expect(mockSaveTokens).toHaveBeenCalled();
@@ -204,9 +220,7 @@ describe("performance probe drivers", () => {
     vi.resetModules();
     // Re-apply env after resetModules
     process.env["GOGMEET_PERF_TRACE"] = "1";
-    const { runNamedProbeSurface } = await import(
-      "../../src/main/app/performance-probe.js"
-    );
+    const { runNamedProbeSurface } = await import("../../src/main/app/performance-probe.js");
     const result = await runNamedProbeSurface("tray", userData);
     expect(result.status).toBe("ok");
     expect(result).toMatchObject({ mode: "tray" });
