@@ -1,12 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { CalendarResult } from "../../src/domain/entities/calendar-result.js";
 import {
-  bindCalendarRefreshFetcher,
-  cancelCalendarRefresh,
-  requestCalendarRefresh,
-  getLastCalendarPublication,
   CalendarRefreshCancelledError,
-  _resetCalendarRefreshCoordinatorForTest,
+  createCalendarRefreshCoordinator,
 } from "../../src/main/calendar/refresh-coordinator.js";
 
 function okResult(label: string, observedAt = Date.now()): CalendarResult {
@@ -24,8 +20,6 @@ function okResult(label: string, observedAt = Date.now()): CalendarResult {
         calendarName: "Work",
         isAllDay: false,
         description: "",
-        meetUrl: null,
-        userEmail: null,
       },
     ],
   };
@@ -46,38 +40,30 @@ function createDeferred<T>(): {
 }
 
 describe("calendar refresh coordinator", () => {
-  beforeEach(() => {
-    _resetCalendarRefreshCoordinatorForTest();
-  });
-
-  afterEach(() => {
-    _resetCalendarRefreshCoordinatorForTest();
-  });
-
   it("happy path: one request produces one provider call and one publication", async () => {
     const fetch = vi.fn().mockResolvedValue(okResult("solo"));
-    bindCalendarRefreshFetcher(fetch);
+    const coordinator = createCalendarRefreshCoordinator(fetch);
 
-    const publication = await requestCalendarRefresh();
+    const publication = await coordinator.requestRefresh();
 
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(publication.publicationGeneration).toBe(1);
     expect(publication.result).toMatchObject({ kind: "ok" });
-    expect(getLastCalendarPublication()).toEqual(publication);
+    expect(coordinator.getLastPublication()).toEqual(publication);
   });
 
   it("ten concurrent requests produce at most current plus one follow-up", async () => {
     const first = createDeferred<CalendarResult>();
     const second = createDeferred<CalendarResult>();
     let calls = 0;
-    bindCalendarRefreshFetcher((_signal) => {
+    const coordinator = createCalendarRefreshCoordinator((_signal) => {
       calls += 1;
       if (calls === 1) return first.promise;
       if (calls === 2) return second.promise;
       return Promise.resolve(okResult(`extra-${calls}`));
     });
 
-    const waiters = Array.from({ length: 10 }, () => requestCalendarRefresh());
+    const waiters = Array.from({ length: 10 }, () => coordinator.requestRefresh());
     await Promise.resolve();
     expect(calls).toBe(1);
 
@@ -95,21 +81,21 @@ describe("calendar refresh coordinator", () => {
     const gens = new Set(publications.map((p) => p.publicationGeneration));
     expect(gens.size).toBe(1);
     expect(publications[0]?.publicationGeneration).toBe(2);
-    expect(getLastCalendarPublication()?.publicationGeneration).toBe(2);
+    expect(coordinator.getLastPublication()?.publicationGeneration).toBe(2);
   });
 
   it("older completion does not mutate lastPublication after a newer follow-up", async () => {
     const first = createDeferred<CalendarResult>();
     const second = createDeferred<CalendarResult>();
     let calls = 0;
-    bindCalendarRefreshFetcher(() => {
+    const coordinator = createCalendarRefreshCoordinator(() => {
       calls += 1;
       return calls === 1 ? first.promise : second.promise;
     });
 
-    const waiterA = requestCalendarRefresh();
+    const waiterA = coordinator.requestRefresh();
     // Queue follow-up before first completes.
-    const waiterB = requestCalendarRefresh();
+    const waiterB = coordinator.requestRefresh();
     await Promise.resolve();
 
     // Complete first (superseded) then second.
@@ -124,12 +110,14 @@ describe("calendar refresh coordinator", () => {
     if (a.result.kind === "ok") {
       expect(a.result.events[0]?.title).toBe("fresh");
     }
-    expect(getLastCalendarPublication()?.publicationGeneration).toBe(2);
+    expect(coordinator.getLastPublication()?.publicationGeneration).toBe(2);
   });
 
   it("manual refresh cannot resolve without a publication", async () => {
-    bindCalendarRefreshFetcher(async () => okResult("must-publish"));
-    const publication = await requestCalendarRefresh();
+    const coordinator = createCalendarRefreshCoordinator(async () =>
+      okResult("must-publish"),
+    );
+    const publication = await coordinator.requestRefresh();
     expect(publication).toMatchObject({
       publicationGeneration: expect.any(Number),
       result: { kind: "ok" },
@@ -138,49 +126,97 @@ describe("calendar refresh coordinator", () => {
 
   it("cancel aborts provider work and rejects waiters with CalendarRefreshCancelledError", async () => {
     const deferred = createDeferred<CalendarResult>();
-    let seenSignal: AbortSignal | null = null;
-    bindCalendarRefreshFetcher((signal) => {
-      seenSignal = signal;
-      return deferred.promise;
+    const seenSignal: { current: AbortSignal | null } = { current: null };
+    let calls = 0;
+    const coordinator = createCalendarRefreshCoordinator((signal) => {
+      calls += 1;
+      seenSignal.current = signal;
+      return calls === 1
+        ? deferred.promise
+        : Promise.resolve(okResult("after-cancel"));
     });
 
-    const pending = requestCalendarRefresh();
+    const pending = coordinator.requestRefresh();
     await Promise.resolve();
-    expect(seenSignal?.aborted).toBe(false);
+    expect(seenSignal.current?.aborted).toBe(false);
 
-    cancelCalendarRefresh();
-    expect(seenSignal?.aborted).toBe(true);
+    coordinator.cancel();
+    expect(seenSignal.current?.aborted).toBe(true);
 
     await expect(pending).rejects.toBeInstanceOf(CalendarRefreshCancelledError);
-    expect(getLastCalendarPublication()).toBeNull();
+    expect(coordinator.getLastPublication()).toBeNull();
 
     // New request after cancel starts clean under a new lifecycle.
-    bindCalendarRefreshFetcher(async () => okResult("after-cancel"));
-    const next = await requestCalendarRefresh();
-    expect(next.publicationGeneration).toBeGreaterThanOrEqual(1);
+    const next = await coordinator.requestRefresh();
+    expect(next.publicationGeneration).toBe(2);
     expect(next.result).toMatchObject({ kind: "ok" });
   });
 
-  it("throws when fetcher is not bound", async () => {
-    _resetCalendarRefreshCoordinatorForTest();
-    await expect(requestCalendarRefresh()).rejects.toThrow(
-      /fetcher is not bound/i,
-    );
+  it("isolates cancellation and publication generations between coordinators", async () => {
+    const firstA = createDeferred<CalendarResult>();
+    let callsA = 0;
+    const signalA: { current: AbortSignal | null } = { current: null };
+    const coordinatorA = createCalendarRefreshCoordinator((signal) => {
+      callsA += 1;
+      signalA.current = signal;
+      return callsA === 1
+        ? firstA.promise
+        : Promise.resolve(okResult("a-after-cancel"));
+    });
+    let callsB = 0;
+    const coordinatorB = createCalendarRefreshCoordinator(async () => {
+      callsB += 1;
+      return okResult(`b-${callsB}`);
+    });
+
+    const pendingA = coordinatorA.requestRefresh();
+    await Promise.resolve();
+    const firstB = await coordinatorB.requestRefresh();
+
+    expect(firstB.publicationGeneration).toBe(1);
+    expect(signalA.current?.aborted).toBe(false);
+
+    coordinatorA.cancel();
+    await expect(pendingA).rejects.toBeInstanceOf(CalendarRefreshCancelledError);
+
+    expect(signalA.current?.aborted).toBe(true);
+    expect(coordinatorA.getLastPublication()).toBeNull();
+    expect(coordinatorB.getLastPublication()).toEqual(firstB);
+
+    const [nextA, secondB] = await Promise.all([
+      coordinatorA.requestRefresh(),
+      coordinatorB.requestRefresh(),
+    ]);
+
+    expect(nextA.publicationGeneration).toBe(2);
+    expect(secondB.publicationGeneration).toBe(2);
+    expect(nextA.result).toMatchObject({
+      kind: "ok",
+      events: [expect.objectContaining({ title: "a-after-cancel" })],
+    });
+    expect(secondB.result).toMatchObject({
+      kind: "ok",
+      events: [expect.objectContaining({ title: "b-2" })],
+    });
+    expect(coordinatorA.getLastPublication()).toEqual(nextA);
+    expect(coordinatorB.getLastPublication()).toEqual(secondB);
   });
 
   it("retries once when a follow-up is queued after a transient fetch failure", async () => {
     let calls = 0;
-    bindCalendarRefreshFetcher(async () => {
+    let requestFollowUp!: () => Promise<unknown>;
+    const coordinator = createCalendarRefreshCoordinator(async () => {
       calls += 1;
       if (calls === 1) {
         // Queue follow-up before failure surfaces.
-        void requestCalendarRefresh();
+        void requestFollowUp();
         throw new Error("transient");
       }
       return okResult("recovered");
     });
+    requestFollowUp = coordinator.requestRefresh;
 
-    const publication = await requestCalendarRefresh();
+    const publication = await coordinator.requestRefresh();
     expect(calls).toBe(2);
     expect(publication.result).toMatchObject({ kind: "ok" });
     if (publication.result.kind === "ok") {
@@ -189,7 +225,7 @@ describe("calendar refresh coordinator", () => {
   });
 
   it("rejects immediately when the signal is already aborted", async () => {
-    bindCalendarRefreshFetcher(async (signal) => {
+    const coordinator = createCalendarRefreshCoordinator(async (signal) => {
       // Simulate a hang that only ends on abort.
       await new Promise<void>((_resolve, reject) => {
         if (signal.aborted) {
@@ -205,16 +241,16 @@ describe("calendar refresh coordinator", () => {
       return okResult("never");
     });
 
-    const pending = requestCalendarRefresh();
+    const pending = coordinator.requestRefresh();
     await Promise.resolve();
-    cancelCalendarRefresh();
+    coordinator.cancel();
     await expect(pending).rejects.toBeInstanceOf(CalendarRefreshCancelledError);
   });
 
   it("propagates non-cancel fetch errors when no follow-up is queued", async () => {
-    bindCalendarRefreshFetcher(async () => {
+    const coordinator = createCalendarRefreshCoordinator(async () => {
       throw new Error("hard-failure");
     });
-    await expect(requestCalendarRefresh()).rejects.toThrow(/hard-failure/);
+    await expect(coordinator.requestRefresh()).rejects.toThrow(/hard-failure/);
   });
 });
