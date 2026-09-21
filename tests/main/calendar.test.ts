@@ -2,12 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { parseEvents } from "../../src/main/swift/event-parser.js";
 import { cleanDescription } from "../../src/domain/services/clean-description.js";
 import {
-  requestCalendarPermission,
-  getCalendarPermissionStatus,
-  getCalendarEventsResult,
-  getCalendarUiState,
-  reportCalendarPollError,
-  invalidateCalendarPermissionCache,
+  createCalendarFacade,
+  type CalendarFacade,
 } from "../../src/main/facades/calendar.js";
 import { resetCalendarProvider } from "../../src/main/calendar/factory.js";
 import { createDarwinEventKitProvider } from "../../src/main/calendar/providers/darwin-eventkit.js";
@@ -485,11 +481,13 @@ describe("parseEvents", () => {
 });
 
 describe("getCalendarEventsResult diagnostics", () => {
+  let calendarFacade: CalendarFacade;
+
   beforeEach(() => {
+    calendarFacade = createCalendarFacade();
     ensureBinaryMock.mockClear();
     runSwiftHelperMock.mockReset();
     resetCalendarProvider();
-    invalidateCalendarPermissionCache();
   });
 
   afterEach(() => {
@@ -634,13 +632,15 @@ describe("getCalendarEventsResult diagnostics", () => {
     runSwiftHelperMock.mockResolvedValueOnce(`${validLine}\nnot-json`);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    const result = await getCalendarEventsResult();
+    const result = await calendarFacade.getCalendarEventsResult();
     if (result.kind !== "ok") throw new Error("expected partial calendar result");
-    expect(getCalendarUiState().darwinPartialRefreshDiagnostics).toMatchObject({ total: 1 });
+    expect(calendarFacade.getCalendarUiState().darwinPartialRefreshDiagnostics).toMatchObject({
+      total: 1,
+    });
 
-    reportCalendarPollError("network unavailable", result.events);
+    calendarFacade.reportCalendarPollError("network unavailable", result.events);
 
-    expect(getCalendarUiState()).toMatchObject({
+    expect(calendarFacade.getCalendarUiState()).toMatchObject({
       phase: "offline-cached",
       darwinPartialRefreshDiagnostics: null,
     });
@@ -717,73 +717,77 @@ describe("cleanDescription", () => {
 });
 
 describe("requestCalendarPermission", () => {
+  let calendarFacade: CalendarFacade;
+
   beforeEach(() => {
+    calendarFacade = createCalendarFacade();
     execFileAsyncMock.mockReset();
     resetCalendarProvider();
-    invalidateCalendarPermissionCache();
   });
 
   it('returns "granted" when AppleScript succeeds', async () => {
     execFileAsyncMock.mockResolvedValueOnce({ stdout: "Calendar1\nCalendar2", stderr: "" });
 
-    const result = await requestCalendarPermission();
+    const result = await calendarFacade.requestCalendarPermission();
     expect(result).toBe("granted");
   });
 
   it('returns "denied" when AppleScript throws', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("execution error"));
 
-    const result = await requestCalendarPermission();
+    const result = await calendarFacade.requestCalendarPermission();
     expect(result).toBe("denied");
   });
 });
 
 describe("getCalendarPermissionStatus", () => {
+  let calendarFacade: CalendarFacade;
+
   beforeEach(() => {
+    calendarFacade = createCalendarFacade();
     execFileAsyncMock.mockReset();
     resetCalendarProvider();
-    invalidateCalendarPermissionCache();
   });
 
   it('returns "granted" when AppleScript succeeds', async () => {
     execFileAsyncMock.mockResolvedValueOnce({ stdout: "Work", stderr: "" });
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("granted");
   });
 
   it('returns "denied" when error contains "not authorized"', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("not authorized to access Calendar"));
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("denied");
   });
 
   it('returns "denied" when error contains "1743"', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("error 1743: permission denied"));
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("denied");
   });
 
   it('returns "not-determined" when error contains "2700"', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("error 2700: application not running"));
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("not-determined");
   });
 
   it('returns "not-determined" when error contains "not determined"', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("access not determined"));
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("not-determined");
   });
 
   it('returns "not-determined" for unknown errors (fallback)', async () => {
     execFileAsyncMock.mockRejectedValueOnce(new Error("something completely unexpected"));
 
-    const result = await getCalendarPermissionStatus();
+    const result = await calendarFacade.getCalendarPermissionStatus();
     expect(result).toBe("not-determined");
   });
 });
