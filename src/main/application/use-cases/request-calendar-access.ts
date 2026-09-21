@@ -12,14 +12,17 @@ export interface RequestCalendarAccessDeps {
 }
 
 export interface RequestCalendarAccess {
-  execute(): Promise<CalendarPermission>;
+  execute(signal?: AbortSignal): Promise<CalendarPermission>;
 }
+
+const DEFAULT_SIGNAL = new AbortController().signal;
 
 export function createRequestCalendarAccess(
   deps: RequestCalendarAccessDeps,
 ): RequestCalendarAccess {
   return {
-    async execute(): Promise<CalendarPermission> {
+    async execute(signal: AbortSignal = DEFAULT_SIGNAL): Promise<CalendarPermission> {
+      signal.throwIfAborted();
       const connecting: Partial<CalendarUiState> = {
         phase: "connecting",
         lastError: null,
@@ -30,10 +33,12 @@ export function createRequestCalendarAccess(
       deps.publisher.publishCalendarStatus(deps.getUiState());
 
       const status = await deps.calendar.requestPermission();
-      deps.setCachedPermission(status);
+      signal.throwIfAborted();
 
       if (status === "granted") {
         const email = (await deps.calendar.getAccountLabel?.()) ?? null;
+        signal.throwIfAborted();
+        deps.setCachedPermission(status);
         const next: Partial<CalendarUiState> = {
           permission: "granted",
           phase: "ready",
@@ -45,6 +50,7 @@ export function createRequestCalendarAccess(
         deps.setUiState(next);
         deps.publisher.publishCalendarStatus(deps.getUiState());
       } else {
+        deps.setCachedPermission(status);
         const next: Partial<CalendarUiState> = {
           permission: status,
           phase: status === "denied" ? "error" : "disconnected",
