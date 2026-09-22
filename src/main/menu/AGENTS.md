@@ -56,7 +56,7 @@ Builds Electron `MenuItemConstructorOptions[]` for the tray icon. Pure builder â
 | Display-horizon ticks / completed-history toggle           | `forceTrayMenuRefresh()`                                                        | **Sync** force rebuild (wall-clock membership must update before next paint/popup) |
 | Windows left-click                                         | sync `refreshContextMenu` + `popUpContextMenu`                                  | Soft `forcePoll({ reason: "auto" })` in parallel                                   |
 
-Menu signature (`trayMenuSignature`) includes `showTomorrowMeetings`, wall-clock **upcoming** membership, `showCompletedTodayMeetings`, and all six Darwin aggregate counts. A changed count rebuilds the native menu; an equal aggregate summary skips a non-forced rebuild. Tray installs with `setContextMenu()` before first activation.
+Menu signature (`trayMenuSignature`) includes `showTomorrowMeetings`, wall-clock **upcoming** membership, `showCompletedTodayMeetings`, and all six Darwin aggregate counts. A changed count rebuilds the native menu; an equal aggregate summary skips a non-forced rebuild. Tray installs with `setContextMenu()` before first activation. On Darwin, cached meetings while permission is still `not-determined` render as `granted` (`ready` or `empty`). Do not copy that onto Windows. A status update with null `events` must not replace `cachedMeetings`.
 
 ## Verification boundary
 
