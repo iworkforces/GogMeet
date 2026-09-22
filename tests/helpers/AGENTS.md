@@ -4,11 +4,12 @@
 
 Shared factories used across Vitest projects.
 
-| File            | Role                                                                          |
-| --------------- | ----------------------------------------------------------------------------- |
-| `test-utils.ts` | Brand validators + meeting/settings fixtures (no `vi` / `expect`)             |
-| `ipc-sender.ts` | Platform-correct authorized `file://` sender fixtures for IPC tests           |
-| `app-graph.ts`  | `testAppGraph(overrides)` → `createTestAppGraph` for handler/lifecycle suites |
+| File | Role |
+| --- | --- |
+| `test-utils.ts` | Brand validators + meeting/settings fixtures (no `vi` / `expect`) |
+| `ipc-sender.ts` | Platform-correct authorized `file://` sender fixtures for IPC tests |
+| `app-graph.ts` | `testAppGraph(overrides)` → `createTestAppGraph` for handler/lifecycle suites |
+| `scheduler-runtime.ts` | `schedulerTestContext` and `calendarPublication` for scheduler plan tests |
 
 Import path convention (note `.js` extension):
 
@@ -41,9 +42,10 @@ import { testAppGraph } from "../helpers/app-graph.js";
 
 ## LEGACY FACTORIES
 
-| Per-file factory | Where                        | Notes                                                     |
-| ---------------- | ---------------------------- | --------------------------------------------------------- |
-| `makeEvent`      | scheduler-* tests            | Prefer `createMockEvent` for new tests                    |
-| `makeSwiftLine`  | `swift/event-parser.test.ts` | Nine-string JSON Lines fixture; no shared replacement yet |
+| Per-file factory | Where | Notes |
+| --- | --- | --- |
+| `makeEvent` | scheduler-* tests | Prefer `createMockEvent` for new tests |
+| `makeSwiftLine` | `tests/main/calendar.test.ts` | Nine-string JSON Lines fixture; no shared replacement yet |
+| `makeLine` | `tests/main/swift/event-parser.test.ts` | Parser-local nine-string helper |
 
 When extending an existing suite, match the surrounding style; when starting a new test file, use the helpers above.

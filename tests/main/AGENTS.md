@@ -14,7 +14,7 @@ Vitest project `main`: Node, `tests/setup.main.ts` (Electron mock plus `setup.as
 | Tray / windows | `tray*`, `meeting-menu`, `*-window`, `window-chrome`, `dock-visibility` |
 | Probes / trace | `performance-probe*`, `performance-trace*`, `guardrails-security`, `after-pack` |
 
-`google-calendar.test.ts` locks 401 refresh, provenance, `pagination-limit`, and incremental 429 (no same-poll full fetch). `calendar-factory.test.ts` locks probe preflight fail-closed. `alert-window.test.ts` locks generation-safe queue handoff and `autoOpenAt` on queued entries. Update-window fixtures follow the current `package.json` version; this file does not pin it.
+`google-calendar.test.ts` locks 401 refresh, provenance, `pagination-limit`, and incremental 429 (no same-poll full fetch). `calendar-factory.test.ts` locks probe preflight fail-closed. `alert-window.test.ts` locks generation-safe queue handoff and `autoOpenAt` on queued entries. `update-window.test.ts` hardcodes dialog copy `1.18.4` and `2.0.0`. Those strings are not `package.json` (currently `2.0.1`). A version bump does not require editing them.
 
 Domain-pure suites live under `tests/domain/`. `preload.test.ts` is the allowed bridge into `src/preload`.
 

@@ -29,7 +29,7 @@ tests/
 ├── main/            # flat *.test.ts plus swift/ (three files)
 ├── renderer/
 ├── vertical/        # calendar-publication.test.ts
-└── bench/           # *.bench.ts only
+└── bench/           # *.bench.ts plus calendar-parser-fixtures.ts
 ```
 
 ## Patterns
