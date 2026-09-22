@@ -32,7 +32,7 @@ Cast helper notes:
 - Prefer importing domain types for contracts; **do not re-export** domain symbols from shared.
 - `IPC_CHANNELS` is the single source of channel names; keep it `as const`.
 - `PushChannelMap` is `SETTINGS_CHANGED`, `CALENDAR_RESULT_UPDATED`, and `ALERT_SHOW`. `WINDOW_SET_HEIGHT` and `ALERT_DISMISSED` are typed on `IpcChannelMap` and travel as `ipcRenderer.send` / `ipcMain.on`.
-- Settings passes `app-icon-aurora--settings`, and Update also passes `--update`. Those class names have no CSS. Fancy motion is `.app-icon-aurora--about` only.
+- `APP_ICON_AURORA_CSS` has no `--settings` or `--update` rules. Fancy motion is `.app-icon-aurora--about` only. Settings adds `margin-top: 2px` in its own stylesheet. The update dialog adds `margin-bottom` and also passes `--about`.
 - Add a channel by updating shared channel maps first, then main handler, preload API, renderer caller, and tests.
 - Calendar partial diagnostics stay inside the existing domain `CalendarResult` carried by `CalendarPublication` and `CalendarUiState`. They need no new IPC channel, DTO, or transport contract.
 - Keep this package tiny — if logic is pure and process-neutral, put it in `src/domain/`.

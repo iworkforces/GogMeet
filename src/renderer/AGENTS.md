@@ -22,13 +22,13 @@ About and Update are main-process `data:` HTML, not renderer entries.
 
 `loadEvents()` → `calendar.getEvents()`. `loadGeneration` drops stale publications. On show, `render()` uses `Date.now()` immediately; network refresh waits until `lastPollTime` is at least 5s old. `applyEventsPush` drops tomorrow unless `showTomorrowMeetings`, then compares `eventListSignature` (`description` excluded). `onResultUpdated` still calls `render()` when that signature is unchanged so clock labels move.
 
-Visible titles use `truncateMiddle` at 25, then `escapeHtml`. CSS `.meeting-title` sets `min-width: 0`. Completed-today rows (when enabled) are muted, have no join control, and re-render from a local timer at the next end or local midnight.
+Visible titles use `truncateMiddle` at 25, then `escapeHtml`. CSS `.meeting-title` sets `min-width: 0`. Completed-today rows (when enabled) are muted, have no join control, and re-render from a local timer at the next end or local midnight. Popover `filterUpcomingMeetings` keeps all-day events. The tray passes `excludeAllDay: true`.
 
 Actions on `#app`: `refresh`, `retry`, `grant-access`, `join-meeting` via `data-event-id`. Join failures show a banner.
 
 ## SETTINGS
 
-Every `AppSettings` field except `schemaVersion` auto-saves. Dependents disable when Auto-Open, Meeting Alert, or Quiet Hours is off. Toggles are native checkboxes. A failed save reverts the toggle and escapes the error. Darwin versus Google is a user-agent `/Mac/i` test: every other host gets the Google block. Brand mark is the aurora **base** tier (`app-icon-aurora--settings` has no extra CSS). `color-scheme` meta says `light dark`; `settings/styles.css` forces dark `#0d1117`.
+Every `AppSettings` field except `schemaVersion` auto-saves. One `settings.set` is in flight; later edits merge into `pendingSave`. A failed save rejects those waiters, reverts the toggle, and escapes the error. Resync and `onChanged` do not render while `isSaving`. Resync also skips while `isCalendarBusy`. Dependents disable when Auto-Open, Meeting Alert, or Quiet Hours is off. Toggles are native checkboxes. Darwin versus Google is `/Mac/i/` and not `/Win|Windows/i/` on the user agent. Every other host gets the Google block. Brand mark is the aurora base tier. `settings/styles.css` only adds `margin-top: 2px` on `--settings` and forces dark `#0d1117`. `color-scheme` meta says `light dark`.
 
 ## ALERT
 
@@ -37,5 +37,5 @@ Payload has `hasMeetUrl` and optional `autoOpenAt`, and no `meetUrl`. `alert/ind
 ## RULES
 
 - Escape user strings in templates, including history titles. Banners that use `textContent` do not need `escapeHtml`.
-- Full re-render on state change. No cross-render DOM refs.
+- Full re-render on state change. The settings toggle save keeps the input across that save and must not render while `isSaving`.
 - History expiry uses the local timer plus settings and horizon pushes, not an extra calendar poll.
