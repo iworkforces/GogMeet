@@ -1,13 +1,13 @@
 # GitHub Workflows
 
-CI/release automation for the Electron app (macOS + Windows). Keep workflow behavior aligned with `package.json`, `.nvmrc` (Node **26**), `scripts/validate-node.mjs`, and packaging guidance in `build/AGENTS.md`. Host package manager: Bun (`packageManager: bun@1.3.14`). Typecheck in CI uses `@typescript/native` via `bun run typecheck`.
+CI/release automation for the Electron app (macOS + Windows). Keep workflow behavior aligned with `package.json`, `.nvmrc` (Node **26**), `scripts/validate-node.mjs`, and packaging guidance in `build/AGENTS.md`. Host package manager: Bun (`packageManager: bun@1.4.1`). Typecheck in CI uses `@typescript/native` via `bun run typecheck`.
 
 ## Files
 
 | File | Role |
 | --- | --- |
 | `pr-check.yml` | PR/push validation on `develop` and `main`: quality gates on macOS + Windows, full and changed-source coverage, and Node 26 icon-drift validation (mac only). |
-| `release.yml` | Main pushes create a version tag only; `v*` tags run parallel `release-mac` and `release-win` jobs that package, verify, and upload to the same GitHub Release. |
+| `release.yml` | A `main` push creates `v${package.json.version}` when missing and, in that same run, packages `release-mac` / `release-win` onto one GitHub Release. Non-beta `v*` tags package too. |
 | `beta-release.yml` | Push to `develop` (e.g. after PR merge): parallel **mac + Windows** packaging into one **GitHub pre-release** with an auto-incremented beta tag. |
 | `measurement.yml` | Weekly (Mon 06:00 UTC) + `workflow_dispatch` measurement lab: synthetic harnesses on macOS/Windows; does **not** ship product changes or gate PRs. |
 

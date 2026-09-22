@@ -19,3 +19,5 @@ Vitest project `application`: Node, no Electron mocks. Covers `src/main/applicat
 - Inject fake ports; do not import Electron or real facades.
 - Prefer pure arrangement/assert over module-level binds.
 - New use cases get a suite here before wiring into facades/graph.
+- Join cancels pending auto-open only after `opener.open` succeeds. An open failure leaves the browser timer armed.
+- Permission, request-access, and settings load/get/update are locked from `tests/main` facade suites when this folder has no file for them.

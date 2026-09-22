@@ -22,3 +22,9 @@ This directory contains two driven adapters: settings persistence and allowliste
 - Pure `src/domain/` and application use cases must not import these concrete adapters. Composition and facades wire them through ports.
 - Import `createJsonSettingsStore` and `createShellMeetingOpener` from their adapter modules. Do not re-export them through `utils`.
 - Tests live in `tests/main/json-settings-store.test.ts` and `tests/main/shell-meeting-opener.test.ts`.
+
+## NOTES
+
+- `createAppGraph` constructs the opener and the JSON store immediately. The calendar provider stays lazy.
+- `settings.json` is pretty-printed JSON via `writeFile`. It is not a `secure-fs` `0o600` file. ENOENT loads defaults and does not create the file. `get` throws if `load` has not run.
+- Blocked or failed opens log `protocol//hostname/…` or `(invalid-url)`.

@@ -10,7 +10,7 @@ Type-safe IPC handler registry. Invoke handlers use `typedHandle()`; fire-and-fo
 
 | File          | Exports                                                                                                                         | Role                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `shared.ts`   | `typedHandle`, `typedSend`, sender validators, window-height bounds (`MIN_WINDOW_HEIGHT` **220** / `MAX_WINDOW_HEIGHT` **480**) | Type-safe IPC wrapper + origin validation (dev: localhost:5173; packaged: `file://` under `lib/renderer/{index,settings,alert}.html`) |
+| `shared.ts`   | `typedHandle`, `typedSend`, sender validators, `MIN_WINDOW_HEIGHT` **220** / `MAX_WINDOW_HEIGHT` **480** | Origin checks: dev `localhost:5173` and `127.0.0.1:5173`; packaged `file:` paths are exactly `lib/renderer/{index,settings,alert}.html` |
 | `app.ts`      | `registerAppHandlers(graph)`                                                                                                    | `APP_OPEN_EXTERNAL` → `graph.opener.open`; `APP_JOIN_MEETING` → `graph.join.byId`; `APP_GET_VERSION`                                  |
 | `calendar.ts` | `registerCalendarHandlers(graph)`                                                                                               | get events / permission / disconnect / UI state; forcePoll on granted                                                                 |
 | `settings.ts` | `registerSettingsHandlers(win, graph)`                                                                                          | get/set settings; invalid sender → fresh defaults without persistence                                                                 |
@@ -34,7 +34,7 @@ Existing `CalendarPublication` and `CalendarUiState` channels carry the optional
 **Settings side effects** (`settings.ts`):
 
 - Timing keys (`openBeforeMinutes`, `windowAlert`, `autoOpenEnabled`, `alertLeadSeconds`, `lateJoinGraceMinutes`, quiet hours, `nativeNotifications`) → `graph.scheduler.restart()`.
-- `showTomorrowMeetings` alone → optional `forcePoll()` (no full restart).
+- `showTomorrowMeetings` alone → `forcePoll({ reason: "user" })` (no full restart).
 - `showCompletedTodayMeetings` alone → `forceTrayMenuRefresh()` only (display-only; **no** restart / force-poll).
 - `launchAtLogin` → `syncAutoLaunch` only.
 - Always `typedSend` `SETTINGS_CHANGED` after successful set (popover + hide-cached Settings window via `getSettingsWindow()` when distinct).
@@ -63,6 +63,6 @@ Existing `CalendarPublication` and `CalendarUiState` channels carry the optional
 - Never open URLs without branded Meet URL / opener allowlist
 - Never push to renderer without checking `win.isDestroyed()`
 - Never use raw `webContents.send()` — always use `typedSend()` from `shared.ts`
-- Errors use `AppError` from `src/domain/entities/errors.ts` — never throw raw strings from handlers
+- Handlers return `Result` values or calendar error objects. They do not throw `AppError` or raw strings
 - Never trust preload-side branded payload typing in fire-and-forget handlers; re-validate and re-brand at main (e.g. `asEventId` on `ALERT_DISMISSED`)
 - Never open meeting URLs with raw `shell.openExternal` — use `graph.opener` / `graph.join.byId`

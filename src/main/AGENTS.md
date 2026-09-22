@@ -31,7 +31,7 @@ Electron main owns lifecycle, tray and menu, BrowserWindows, system APIs, typed 
 ## Calendar publication and automation
 
 - Calendar calls use `facades/calendar.ts`, never provider factories directly.
-- `refreshCalendarPublication()` and `requestCalendarRefresh()` share one in-flight fetch. A concurrent request queues at most one follow-up. All waiters receive the final `CalendarPublication` for that chain. The coordinator assigns monotonic `publicationGeneration`, retains only the final publication, and cancellation aborts provider work before a later request starts a new lifecycle epoch.
+- `refreshCalendarPublication()` delegates to `createCalendarRefreshCoordinator().requestRefresh()`. There is no `requestCalendarRefresh` symbol. A concurrent request queues at most one follow-up. All waiters receive the final `CalendarPublication` for that chain. The coordinator assigns monotonic `publicationGeneration`, retains only the final publication, and cancellation aborts provider work before a later request starts a new lifecycle epoch.
 - `CalendarPublication` is `{ publicationGeneration, result }`. It is the coordinated refresh and IPC envelope. `CalendarResult` is the underlying live complete or partial, offline-cache, or error outcome.
 - `GetMeetings` projects results into the calendar UI snapshot. Complete live data becomes `ready` or `empty`; live partial becomes `limited`; offline cache becomes `offline-cached` with `cacheAgeMs`; errors become `error`.
 - Partial results keep valid events. The scheduler keeps those events for tray, popover, shortcuts, and explicit joins, then suspends browser, alert, title, countdown, and in-meeting automation. Only live complete results schedule automatic work.
@@ -39,7 +39,7 @@ Electron main owns lifecycle, tray and menu, BrowserWindows, system APIs, typed 
 
 ## Architecture rules
 
-- `events.ts` decouples scheduler, power, calendar UI, and tray through `meeting-list-updated`, `calendar-status-updated`, and `power-state-changed`.
+- `events.ts` emits `meeting-list-updated`, `calendar-status-updated`, and `power-state-changed`. Tray subscribes to the list and status events. AC/battery and resume/unlock call `forcePoll({ reason: "power" })` from lifecycle.
 - `AppGraph` owns lifecycle, IPC, tray, and shortcut dependencies. Its factory creates graph-local calendar, settings, scheduler, join, watcher, and one opener; it finalizes overrides before downstream closures use them.
 - Outside `scheduler/`, import only `scheduler/facade.ts` or use `graph.scheduler`.
 - `swift/` may be imported only by `calendar/providers/darwin-eventkit.ts` and `swift/**`. Facades must not import `swift/*` or `calendar/auth/*`.

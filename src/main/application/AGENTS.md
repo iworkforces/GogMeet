@@ -47,7 +47,7 @@ application/
 - Ports are TypeScript interfaces. Use cases depend on ports and `src/domain`, never concrete adapters.
 - `CalendarPort.getEvents` requires `AbortSignal`. The coordinator passes it through to the use case and provider so cancellation reaches the boundary.
 - Provider optionals on `CalendarPort` include watch, disconnect, warmup, account label, OAuth state, and watch revival.
-- `SchedulerPort` is deliberately narrower than `AppGraph.scheduler`. Its `forcePoll` returns `Promise<void>`; the graph returns `Promise<CalendarPublication | null>`.
+- `SchedulerPort` and `ClockPort` have no production importer. Join takes `JoinMeetingDeps`. The watcher calls facade `forcePoll`, which returns `Promise<CalendarPublication | null>`.
 - Calendar facade work is not limited to one-line delegation. It lazily resolves provider ports, owns permission and UI snapshot state, binds use cases to the refresh coordinator, exposes the latest publication, and publishes poll-level errors. Keep those responsibilities out of use cases.
 - Composition injects the graph-local dependencies each use case needs. `createAppGraph(overrides?: AppGraphOverrides)` finalizes overrides before it creates downstream scheduler, join, and watcher closures.
 - Application tests live in `tests/application/` and use no Electron mocks.

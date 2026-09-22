@@ -1,37 +1,36 @@
 # Scheduler State — Sliced State Composition
 
-Internal state for the scheduler subsystem, split into slices composed by `index.ts`. Files here are private to `scheduler/` (enforced by `.sentrux/rules.toml` rule `state-internal-only`).
+Private to `scheduler/`. `.sentrux` rule `state-internal-only` is not CI. Do not import `state/*` from outside `scheduler/`.
 
 ## FILES
 
-| File               | Role                                                                                                                                                                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`         | Composition root: `SchedulerState` interface, `createSchedulerState()` factory, singleton, `replaceState()`, getters/setters                                                          |
-| `state-cleanup.ts` | Stale timer pruning, bulk resource cleanup, in-meeting timer cleanup                                                                                                                  |
-| `state-timers.ts`  | Timer-handle Maps, `scheduledEventData` snapshots (written via interpret `set-snapshot`, not browser-timer), fired/cancelled suppression state; exports `FIRED_EVENT_TTL_MS` (15 min) |
-| `state-display.ts` | Tray display scalars: `activeTitleEventId`, `activeInMeetingEventId`, dirty flags                                                                                                     |
-| `state-poll.ts`    | Poll metadata: `pollTimeout`, `pollEpoch`, `consecutiveErrors`, `lastKnownEvents`, including successful live partial results and their optional Darwin count aggregate                |
-| `state-runtime.ts` | Runtime callbacks: `win`, `onTrayTitleUpdate`, `powerCallbacks`                                                                                                                       |
-
-## WHERE TO LOOK
-
-| Task                              | Location                                          |
-| --------------------------------- | ------------------------------------------------- |
-| Add a new timer Map               | `state-timers.ts` → extend `TimersState`          |
-| Add a tray-display scalar         | `state-display.ts` → extend `DisplayState`        |
-| Tweak error cap / poll race guard | `state-poll.ts`                                   |
-| Wire a new runtime callback       | `state-runtime.ts` → extend `RuntimeState`        |
-| Compose a new slice               | `index.ts` → spread into `createSchedulerState()` |
+| File | Role |
+|------|------|
+| `index.ts` | `SchedulerState` and `createSchedulerState()`. Re-exports cleanup helpers, `ScheduledEventSnapshot`, `PowerCallbacks`. No singleton and no `replaceState` |
+| `state-cleanup.ts` | `clearSchedulerResources` (`preserveFiredState`, `preserveLastKnownEvents`) |
+| `state-timers.ts` | Timer maps, `scheduledEventData`, fired / alert-fired / `cancelledEvents`. `FIRED_EVENT_TTL_MS` is 15 min |
+| `state-display.ts` | Active title and in-meeting ids, dirty flags |
+| `state-poll.ts` | `pollTimeout`, `pollEpoch`, `consecutiveErrors`, `lastKnownEvents`. Cap constant is 4 |
+| `state-runtime.ts` | `win`, `onTrayTitleUpdate`, `powerCallbacks` |
 
 ## NOTES
 
-- Slices compose via spread in `createSchedulerState()`: `{ ...createTimersState(), ...createDisplayState(), ...createPollState(), ...createRuntimeState() }`.
-- `replaceState()` snapshots refs, calls `clearSchedulerResources`, restores runtime + optional fired state (`preserveFiredState` from facade stop/restart).
-- `firedEvents` / `alertFiredEvents` suppress browser open / alert re-fire (`FIRED_EVENT_TTL_MS` = 15 min). **`cancelledEvents` is title-countdown bookkeeping only** — never use it for auto-open suppression.
-- `PowerCallbacks` type lives on the composed state (used by composition `app-graph` / power wiring).
-- `pollEpoch` is a race-condition guard for stale callbacks.
-- `incrementConsecutiveErrors()` caps at `MAX_CONSECUTIVE_ERRORS_CAP` (4).
-- `lastKnownEvents` retains every successful calendar result, including a live partial with its safe Darwin aggregate. State stores the result unchanged: it does not turn counts into labels or clear UI diagnostics.
-- Snapshot map `scheduledEventData` is written via interpret `set-snapshot` only (not by browser-timer).
-- All external access goes through getter/setter functions from `index.ts`. Never reach into raw Maps from outside `scheduler/`.
-- Importing `state/*` from outside `scheduler/` violates `.sentrux` `state-internal-only` (and project convention).
+- `createSchedulerState()` spreads timers, display, poll, and runtime.
+- Stop/restart replacement is `resetRuntimeState` in `facade.ts`. It keeps the window, tray callback, and power callbacks, preserves `lastKnownEvents`, and copies fired sets when `preserveFiredState` is set.
+- `poll.ts` increments `consecutiveErrors` and caps it at 4. The warn threshold is 3. There is no `incrementConsecutiveErrors()`.
+- `firedEvents` / `alertFiredEvents` suppress browser open and alert re-fire. `cancelledEvents` is title-countdown bookkeeping only.
+- The interpreter writes `scheduledEventData` (`set-snapshot`, `start-in-meeting`, `update-snapshot`). `browser-timer` does not.
+- Scheduler code reads `runtime.state` directly. `index.ts` has no getter layer.
+- `lastKnownEvents` stores the `CalendarResult` unchanged, including a Darwin live partial.
+
+## WHERE TO LOOK
+
+| Task | Location |
+|------|----------|
+| Add a timer map | `state-timers.ts` → `TimersState` |
+| Add a tray scalar | `state-display.ts` → `DisplayState` |
+| Error cap or `pollEpoch` | `state-poll.ts` |
+| Runtime callback | `state-runtime.ts` → `RuntimeState` |
+| Add a slice | spread it in `createSchedulerState()` |
+
+`pollEpoch` is the stale-callback guard. `PowerCallbacks` is re-exported for power wiring. Facade methods are the access path from outside this folder.

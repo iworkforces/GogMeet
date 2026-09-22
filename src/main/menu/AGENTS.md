@@ -49,12 +49,14 @@ Builds Electron `MenuItemConstructorOptions[]` for the tray icon. Pure builder â
 
 | Trigger                                                    | Tray API                                                                        | Notes                                                                              |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `meeting-list-updated` / `calendar-status-updated` / theme | `requestTrayRebuild(win)`                                                       | Microtask-coalesces bursty signals into one rebuild                                |
-| User Refresh / Retry / Connect-granted                     | `forcePoll({ reason: "user" })` then `requestTrayRebuild(win, { force: true })` | Immediate re-fetch (no 10s poll coalesce); force clears menu signature             |
+| `meeting-list-updated` / `calendar-status-updated`         | `requestTrayRebuild(win)`                                                       | Microtask-coalesces bus bursts. Theme changes call `tray.setImage` only            |
+| Updater label listener                                     | `forceTrayMenuRefresh()`                                                        | Menu signature omits the updater label, so this path stays synchronous             |
+| User Refresh / Retry / Connect-granted                    | `forcePoll({ reason: "user" })` then `requestTrayRebuild(win, { force: true })` | Immediate re-fetch (no 10s poll coalesce); force clears the menu signature        |
+| Disconnect                                                 | `requestTrayRebuild(win, { force: true })` after `disconnect()`                 | Clears `cachedMeetings`. Does not poll                                              |
 | Display-horizon ticks / completed-history toggle           | `forceTrayMenuRefresh()`                                                        | **Sync** force rebuild (wall-clock membership must update before next paint/popup) |
 | Windows left-click                                         | sync `refreshContextMenu` + `popUpContextMenu`                                  | Soft `forcePoll({ reason: "auto" })` in parallel                                   |
 
-Menu signature (`trayMenuSignature`) includes wall-clock **upcoming** membership, `showCompletedTodayMeetings`, and all six Darwin aggregate counts. A changed count rebuilds the native menu; an equal aggregate summary skips a non-forced rebuild. Tray installs with `setContextMenu()` before first activation.
+Menu signature (`trayMenuSignature`) includes `showTomorrowMeetings`, wall-clock **upcoming** membership, `showCompletedTodayMeetings`, and all six Darwin aggregate counts. A changed count rebuilds the native menu; an equal aggregate summary skips a non-forced rebuild. Tray installs with `setContextMenu()` before first activation.
 
 ## Verification boundary
 
