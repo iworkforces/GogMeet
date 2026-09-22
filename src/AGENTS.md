@@ -41,7 +41,7 @@ Process and layer split. `main/` owns Node and Electron. `preload/` is the only 
 | Join / open | `shell-meeting-opener.ts`, `join-meeting.ts`, `graph.join.byId` |
 | Settings schema | `domain/entities/settings.ts` (v3), `services/settings-parse.ts` |
 | New meeting host | Swift `findMeetUrl`, `domain/services/url-extract.ts`, `policies/meet-url-allowlist.ts`, domain tests |
-| Packaged probes | `main/app/performance-probe*.ts` — lab/CI only |
+| Packaged probes | `main/app/performance-probe.ts`, `main/app/performance-probes/` — lab/CI only |
 | Window chrome | `main/utils/window-chrome.ts` (`#0d1117` for settings, about, update) |
 
 ## src-local rules

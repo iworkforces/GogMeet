@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
 **Generated:** 2026-09-22
-**Commit:** 9478386
+**Commit:** 2170fb9
 **Branch:** develop
 
 ## OVERVIEW
@@ -45,25 +45,26 @@ Skip `lib/`, `dist/`, `coverage/`, `node_modules/`. Subsystem rules live in chil
 | Tray / windows | `main/tray.ts`, `menu/`, `windows/` | coalesce vs sync force |
 | Settings UI | `renderer/settings/` | schema v3; canvas `#0d1117` |
 | Guardrails | `docs/security/permanent-guardrails.md` | `bun run guardrails` |
+| Which doc is current | `docs/AGENTS.md` | STATUS version can lag `package.json` |
 | Packaging | `electron-builder.yml`, `build/AGENTS.md` | per-arch Windows NSIS |
 
 ## CODE MAP
 
-No TypeScript language server is configured, and no `codegraph_*` tool is connected (`.codegraph/` is on disk only). **Refs are unmeasured.** Symbols below were confirmed by reading the defining file.
+No TypeScript language server is configured, and no `codegraph_*` tool is connected (`.codegraph/` is on disk only). **Refs** count files under `src/` and `tests/` whose text contains the symbol, including the definition. They are not call-graph edges.
 
 | Symbol | Type | Location | Refs | Role |
 |--------|------|----------|------|------|
-| `createAppGraph` | function | `composition/app-graph.ts` | — | wires calendar, settings, scheduler, join, watcher, one opener |
-| `initializeApp` | function | `app/lifecycle.ts` | — | boot order; stores `activeGraph` |
-| `refreshCalendarPublication` | method | `facades/calendar.ts` | — | calls coordinator `requestRefresh` |
-| `planSchedule` | function | `scheduler/core/plan-schedule.ts` | — | pure actions; `set-snapshot` first |
-| `isCalendarAutomationEligible` | function | `domain/entities/calendar-result.ts` | — | live `complete` only |
-| `createJoinMeeting` | function | `application/use-cases/join-meeting.ts` | — | success cancels pending auto-open |
-| `createShellMeetingOpener` | function | `infrastructure/electron/shell-meeting-opener.ts` | — | allowlisted `graph.opener` |
-| `typedHandle` | function | `ipc-handlers/shared.ts` | — | sole `ipcMain.handle` |
-| `getActiveCalendarProvider` | function | `calendar/factory.ts` | — | probe throw, fixture, Darwin, else Google |
-| `eventRecordIdentifier` | function | `swift/event-occurrence-identity.swift` | — | `id:bitPattern` occurrence uid |
-| `readSwiftSource` | function | `swift/binary-cache.ts` | — | identity bytes + newline + events bytes |
+| `createAppGraph` | function | `composition/app-graph.ts` | 8 | wires calendar, settings, scheduler, join, watcher, one opener |
+| `initializeApp` | function | `app/lifecycle.ts` | 5 | boot order; stores `activeGraph` |
+| `refreshCalendarPublication` | method | `facades/calendar.ts` | 10 | calls coordinator `requestRefresh` |
+| `planSchedule` | function | `scheduler/core/plan-schedule.ts` | 4 | pure actions; `set-snapshot` first |
+| `isCalendarAutomationEligible` | function | `domain/entities/calendar-result.ts` | 6 | live `complete` only |
+| `createJoinMeeting` | function | `application/use-cases/join-meeting.ts` | 5 | success cancels pending auto-open |
+| `createShellMeetingOpener` | function | `infrastructure/electron/shell-meeting-opener.ts` | 4 | allowlisted `graph.opener` |
+| `typedHandle` | function | `ipc-handlers/shared.ts` | 7 | sole `ipcMain.handle` |
+| `getActiveCalendarProvider` | function | `calendar/factory.ts` | 4 | probe throw, fixture, Darwin, else Google |
+| `eventRecordIdentifier` | function | `swift/event-occurrence-identity.swift` | 3 | `id:bitPattern` occurrence uid |
+| `readSwiftSource` | function | `swift/binary-cache.ts` | 4 | identity bytes + newline + events bytes |
 
 ## CONVENTIONS
 
