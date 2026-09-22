@@ -38,8 +38,8 @@ Google is live complete only when the calendar list and every selected calendar 
 
 ## Google
 
-- Extract the join URL from the raw description, then `cleanDescription`, then `validateMeetUrl`.
-- Incremental sync runs when a stored token exists and the process-local index is non-empty. A cold process full-fetches.
+- `extractMeetingUrl` walks `hangoutLink`, `conferenceData.entryPoints` URIs, `location`, raw `description`, then `cleanDescription`. The first allowlisted match wins. `validateMeetUrl` brands it.
+- Incremental sync runs when a stored token exists and the process-local index is non-empty. A cold process full-fetches. Incremental `events.list` sends `syncToken` only on the first page and does not send `timeMin`, `timeMax`, or `orderBy`.
 - HTTP 410 clears that calendar's token and index, then full-fetches. Disconnect clears tokens, sync tokens, the index, and the cache.
 - `pagination-limit` does not mutate that calendar's index or token. A finished sibling may still save its own token. Cache writes require aggregate `completeness === "complete"`.
 - Full-window malformed `items` becomes `pagination-limit` once any events were collected. Incremental malformed `items` returns `complete`, and those upserts and deletes are applied.
@@ -54,3 +54,4 @@ Google is live complete only when the calendar list and every selected calendar 
 - Honor `AbortSignal` on helper and HTTP calls.
 - Facades do not import `auth/*` or `swift/*`.
 - Fixture loading requires an unpackaged app.
+- `resetCalendarProvider()` stops watch and drops the process cache. It does not clear tokens, sync tokens, the index, or the offline cache. Google `disconnect()` does.
