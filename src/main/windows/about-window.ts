@@ -92,6 +92,16 @@ function escapeAttr(str: string): string {
   return escapeHtml(str);
 }
 
+/** Drop keyboard focus from any control so present does not ring the GitHub link. */
+function blurAboutPageFocus(win: BrowserWindow): void {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+  void win.webContents
+    .executeJavaScript(
+      "requestAnimationFrame(function(){var el=document.activeElement;if(el instanceof HTMLElement)el.blur();})",
+    )
+    .catch(() => undefined);
+}
+
 function presentAboutWindow(win: BrowserWindow): void {
   if (win.isDestroyed()) return;
   if (!win.isVisible()) {
@@ -99,8 +109,9 @@ function presentAboutWindow(win: BrowserWindow): void {
   }
   // Always claim Dock while this dialog is presented (idempotent).
   holdAboutDock();
-  // Window focus only — do not steal keyboard focus into the GitHub link.
+  // Window focus only — no control should hold keyboard focus on present.
   win.focus();
+  blurAboutPageFocus(win);
 }
 
 /**
