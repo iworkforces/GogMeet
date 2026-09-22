@@ -25,7 +25,7 @@ Leaf modules wrapping Electron/OS platform APIs. Mostly one OS surface per file.
 - Never import scheduler internals (`index`, `state`, `poll`) — facade or graph only.
 - Never call `allowSleep()` without a matching prior `preventSleep()`.
 - Never request notification permission here; `notification.ts` is probe-only.
-- Never **download/install** outside `getUpdateInstallPolicy().kind === "full"` (feed-only/portable/unpackaged may still show explain dialogs).
+- Never **download/install** outside `getUpdateInstallPolicy().kind === "full"` (feed-only/portable/unpackaged may still show explain dialogs). A background `error` must leave `ready-to-install` in place when `readyVersion` is set.
 - Manual check surfaces the native **update window** (aurora; `phase` is `checking` or `result`, and download stays on `checking`; session dismiss tracking; sticky-dismiss cleared per tray entry). Background startup check stays log-only (no Restart spam) and joins single-flight with manual.
 - macOS **full** only when `codesign` reports Developer ID Application (not ad-hoc). Otherwise **feed-only**: no autoDownload / autoInstallOnAppQuit; Open Releases.
 - Windows: `publisherName` absent skips Authenticode (sha512 still enforced); `GOGMEET_UNSIGNED=1` forces skip only when packaged (dogfood).
