@@ -30,22 +30,23 @@ Darwin diagnostics are six counts: `total`, `malformedRecord`, `malformedFieldCo
 
 | Concern | Path |
 |---------|------|
-| Brands | `entities/brand.ts` — `EventId`, `MeetUrl`, `IsoUtc`, `WindowHeight` (220–480) |
+| Brands | `entities/brand.ts` — `asMeetUrl` is structural (`https`, no userinfo, no port). Allowlist is `validateMeetUrl`. `WindowHeight` is 220–480 |
 | Result / publication | `entities/calendar-result.ts`, `calendar-publication.ts` |
 | UI phase | `entities/calendar-ui-state.ts` |
 | Settings v3 | `entities/settings.ts`, `services/settings-parse.ts` |
-| Allowlist | `policies/meet-url-allowlist.ts` — suffixes only `.zoom.us` and `.webex.com` |
+| Allowlist | `policies/meet-url-allowlist.ts` — exact hosts plus suffixes `.zoom.us` and `.webex.com`. Apex `webex.com` is not a suffix match |
 | Exact-host prefixes | `services/url-validation.ts` `MEETING_URL_ALLOWLIST` (no suffixes) |
 | Extract order | `services/url-extract.ts` — Zoom, Meet, Teams, Webex, Calendly; `href=` and bare hosts |
 | Join URL | `services/build-meet-url.ts` — Meet `authuser`, Zoom `uname` |
 | Wall clock | `services/meeting-time.ts` — in progress is `start ≤ now < end` |
+| Next join | `services/pick-join-target.ts` — timed events with a URL; soonest in-progress end, else next future start |
 | Titles | `services/truncate-middle.ts` — `MEETING_TITLE_DISPLAY_MAX_CHARS` is 25 |
 | Host vs OS | `services/platform.ts` is Meet vs Zoom. OS is `main/platform/os.ts` |
 | Signature | `services/event-signature.ts` — `eventListSignature` drops `description` |
 
 ## Settings v3
 
-`SETTINGS_SCHEMA_VERSION` is 3. `showTomorrowMeetings` defaults to true. `showCompletedTodayMeetings` defaults to false. `parseSettingsRecord` rewrites legacy files, maps `fullScreenAlert` → `windowAlert`, and fills missing booleans from defaults. Timing clamps live on the entity. IPC side effects of those toggles are in `ipc-handlers/AGENTS.md`.
+`SETTINGS_SCHEMA_VERSION` is 3. `showTomorrowMeetings` defaults to true. `showCompletedTodayMeetings` defaults to false. `parseSettingsRecord` mutates the in-memory record: maps `fullScreenAlert` → `windowAlert`, fills missing booleans, and clamps. It does not write the file. `JsonSettingsStore` persists. IPC side effects of those toggles are in `ipc-handlers/AGENTS.md`.
 
 ## RULES
 
