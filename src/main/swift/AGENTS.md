@@ -18,8 +18,8 @@ macOS EventKit helper. The only production TypeScript importer outside `swift/**
 | `binary-cache.ts` | `readSwiftSource`; cache dir `{tmpdir}/googlemeet/` mode `0o700` |
 | `binary-compiler.ts` | `swiftc` / `strip` may use `execFile`. The event dump must not |
 | `calendar-watch-sidecar.ts` | `--watch`. Stream ceilings match the one-shot runner |
-| `event-parser.ts` | Nine fields to `MeetingEvent[]`, plus internal diagnostics |
-| `event-field-parser.ts` | Field parse. Notes go through domain `cleanDescription` |
+| `event-parser.ts` | Nine fields to `MeetingEvent[]`, plus diagnostics. Notes go through domain `cleanDescription` |
+| `event-field-parser.ts` | ISO pair, `EventId`, and `MeetUrl`. No notes |
 | `event-validator.ts` | Exits 2/3/4 map to `calendar-*` errors. There is no exit 1 |
 | `guards.ts` | Exec and tuple guards |
 
@@ -27,7 +27,7 @@ macOS EventKit helper. The only production TypeScript importer outside `swift/**
 
 `readSwiftSource` is the raw identity bytes, one `0x0A`, then the raw events bytes. `source.hash` is SHA-256 hex of that buffer, compared after `trim()`. The same buffer is the single-file `swiftc` unit under the cache dir. `computeSwiftSourceHash` hashes one path and is not this digest.
 
-`ensureBinary` recompiles when the hash changes or the binary is missing or not executable. One `runSwiftHelper` may recompile on a pre-flight hash mismatch and again on spawn `ENOENT` / `ENOEXEC`. Abort, timeout, overflow, exits 2/3/4, signals, bad stdout, and parser diagnostics do not recompile.
+`ensureBinary` recompiles when the hash changes or the binary is missing or not executable. One `runSwiftHelper` may recompile on a pre-flight hash mismatch and again on spawn `ENOENT` / `ENOEXEC`. Abort, timeout, overflow, exits 2/3/4, signals, bad stdout, and parser diagnostics do not recompile. A packaged `Resources/` helper, when executable, is copied into the cache and can skip `swiftc`; that copy writes the dual-source digest into `source.hash` when the source hash is available.
 
 ## Protocol
 
