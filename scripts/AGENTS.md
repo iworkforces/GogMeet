@@ -1,102 +1,47 @@
 # Scripts
 
-Repository automation scripts for local development and asset generation. Invoked by `package.json` or manually; not bundled into app runtime.
+Dev, icons, release verifiers, guardrails, beta tags, and the perf lab. Invoked from `package.json` or CI. Not bundled into the app.
 
 ## Files
 
-| File                                    | Role                                                                                                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `dev.ts`                                | Bun dev orchestrator: rslib watch for main/preload, rsbuild dev server, Electron launch                                                          |
-| `generate-calendar-tray-icons.mjs`      | Sharp asset generator: tray PNGs (mac 18/36 + win 16/32), `build/icon.icns` (mac/iconutil), `build/icon.ico`, About SVG                          |
-| `validate-node.mjs`                     | Host-Node 26 guard + icon generator under host Node (`bun run validate:node`)                                                                    |
-| `verify-macos-release.mjs`              | Official macOS release verifier (DMG/ZIP inventory, signing, stapling, dual-source Swift smoke)                                                  |
-| `macos-release-verifier-*.mjs`          | Helpers for mac verifier: container, pure helpers, injectable natives (dual Swift sources + dual-source `source.hash`)                           |
-| `verify-windows-release.mjs`            | Windows release inventory (NSIS + portable x64/arm64; optional latest.yml)                                                                       |
-| `merge-windows-latest-yml.mjs`          | Rebuilds `dist/latest.yml` listing both NSIS arches after sequential arch builds                                                                 |
-| `next-beta-tag.mjs`                     | Pure helper for develop beta numbering: next `vX.Y.Z-beta-N` tag + app version                                                                   |
-| `guardrails-scan.mjs`                   | Permanent P-NEVER scan (`bun run guardrails`); `--self-test` / `guardrails:self-test` for fixture mode                                           |
-| `check-swift-package-layout.mjs`        | Dual Swift sources on disk + electron-builder `files`/`asarUnpack` + dual-source hash formula (`bun run check:swift-package-layout`)             |
-| `performance/report.mjs`                | Aggregate opt-in perf JSONL → p50/p95/min/max/sampleCount (`bun run perf:report`)                                                                |
-| `performance/workspace-fingerprint.mjs` | Fixed-exclusion HEAD + tracked-diff + untracked manifest digests (`perf:workspace-fingerprint`)                                                  |
-| `performance/measure-*.mjs`             | Lab harnesses: google-calendar, **tray/alert/startup/safe-storage** (packaged probe profile; synthetic never native), build-package (`perf:lab`) |
-| `performance/helpers/*`                 | Shared stats + google-shadow + **packaged-probe** (isolated userData launch/cleanup) for lab scripts                                             |
+| File | Role |
+|------|------|
+| `dev.ts` | Bun: rslib watch, Rsbuild on port 5173, then Electron |
+| `generate-calendar-tray-icons.mjs` | Tray PNGs, `build/icon.icns` (macOS `iconutil`), `build/icon.ico` |
+| `validate-node.mjs` | Host Node major ≥ 26, then the icon generator |
+| `verify-macos-release.mjs` | DMG/ZIP inventory, signing, stapling, dual-source Swift smoke |
+| `macos-release-verifier-*.mjs` | Container, helpers, natives. Hash is identity + newline + events |
+| `verify-windows-release.mjs` | NSIS + portable x64/arm64. `REQUIRE_UPDATER_YML=1` checks `latest.yml` |
+| `windows-latest-yml-verifier.mjs` | Two NSIS entries; primary path is x64 |
+| `merge-windows-latest-yml.mjs` | Rebuild `dist/latest.yml` after the sequential arch builds |
+| `next-beta-tag.mjs` | `vX.Y.Z-beta-N` tag and `X.Y.Z-beta.N` app version. Workflow-only |
+| `guardrails-scan.mjs` | `bun run guardrails`. `--self-test` is `guardrails:self-test` |
+| `check-swift-package-layout.mjs` | Both Swift sources on disk, in `files` and `asarUnpack`, distinct hash |
+| `performance/report.mjs` | Opt-in JSONL → p50/p95. Exit 1 on bad or empty input |
+| `performance/workspace-fingerprint.mjs` | Fixed exclusions. Not a pass/fail gate |
+| `performance/measure-*.mjs` | Lab harnesses. `perf:lab` chains google, tray, safe-storage, startup, alert, build |
+| `performance/helpers/*` | `stats.mjs`, `google-shadow.mjs` (`MAX_PAGES=10`), `packaged-probe.mjs` |
 
-## Script tests (`tests/scripts/`)
+## dev.ts
 
-| Suite group                                                              | Covers                                                                                               |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `validate-node.test.ts`                                                  | Host Node major + skip-generate flag                                                                 |
-| `guardrails-scan.test.ts`                                                | P-NEVER scanner + self-test fixtures                                                                 |
-| `next-beta-tag.test.ts`                                                  | Beta tag / app version numbering                                                                     |
-| `merge-windows-latest-yml.test.ts`                                       | Dual-arch latest.yml merge                                                                           |
-| `verify-macos-release.test.ts` / `macos-release-verifier-native.test.ts` | Official mac verifier pure helpers + natives (both Swift sources + dual-source hash)                 |
-| `verify-windows-release.test.ts`                                         | Windows artifact inventory                                                                           |
-| `performance-*.test.ts`                                                  | report, tray, google, safe-storage, startup, alert, build-package, google-shadow, **packaged-probe** |
-| `calendar-parser-bench-fixtures.test.ts`                                 | Bench fixture integrity                                                                              |
+Shebang `bun`. Cleans `lib/main` and `lib/preload`, waits for both CJS bundles and TCP `localhost:5173`, then launches Electron with `VITE_DEV_SERVER_URL`. SIGINT/SIGTERM kills the children. Do not replace the TCP check with a fixed sleep.
 
-## Performance tooling
+## Icons and Node 26
 
-- **Not** PR quality gates. Weekly/manual collection: `.github/workflows/measurement.yml` + `docs/performance/measurement-lab.md`.
-- Opt-in product traces use `GOGMEET_PERF_TRACE=1` + `src/main/utils/performance-trace.ts` (+ atomic file sink).
-- Packaged probes: `helpers/packaged-probe.mjs` — finite modes, `gogmeet-perf-probe-` userData under tmpdir (separator-safe cleanup), 90s timeout TERM→KILL, copy only fixed JSONL to script `--output-dir`, recursive cleanup.
-- Measure scripts exit **0** for `blocked` / threshold `rejected` / `retained`; exit **1** for launched `timeout` / `crash` / missing-trace. Tray retention uses **observed** skip rates only (no floor).
-- Fingerprint exclusions are fixed (cannot be chosen by reviewers): `.omo/evidence/**`, `lib/**`, `dist/**`, `coverage/**`, `node_modules/**`, `.eslintcache`, `*.tsbuildinfo`.
-- Tests: `tests/scripts/performance-*.test.ts`, `tests/scripts/guardrails-scan.test.ts`.
-- Parser microbench is separate: `bun run bench:calendar-parser` → `vitest.bench.config.ts` (outside workspace).
+`validate:node` refuses host Node below major 26, then generates icons. `NODE_VALIDATE_SKIP_GENERATE=1` is test-only. Do not hand-edit tray PNGs, `icon.icns`, or `icon.ico`. Host Node 26 is contributor tooling, separate from Electron's runtime and from `engines.node` (`>=20`).
 
-## `dev.ts` Contract
+## Perf exits
 
-- Shebang `#!/usr/bin/env bun`; run via `bun run dev`.
-- Cleans `lib/main` and `lib/preload` before starting watches.
-- Starts rslib watches for main + preload and Rsbuild on port `5173`.
-- Waits for `lib/main/index.cjs` and `lib/preload/index.cjs`, then TCP-checks `localhost:5173` before Electron.
-- Launches Electron with `--disable-gpu-sandbox`, `ELECTRON_ENABLE_LOGGING=1`, `VITE_DEV_SERVER_URL=http://localhost:5173`.
-- SIGINT/SIGTERM and Electron exit kill all child processes.
+Packaged probes (`perf:tray`, `perf:alert`, `perf:startup`, `perf:safe-storage`): exit 0 for `blocked`, `ok`, `retained`, and threshold `rejected`. Exit 1 for timeout, crash, missing trace, or harness failure. `perf:google` exits 1 on `rejected` plus `paired-shadow-mismatch`. `perf:build-package` exits 1 only when `GOGMEET_PERF_RUN_BUILD=1` and the build fails.
 
-## Icon Generation Contract
+`packaged-probe.mjs` uses a `gogmeet-perf-probe-` userData directory under tmp, a 90s TERM→KILL, and copies only `gogmeet-perf-trace-v1.jsonl`. Row and byte caps live in `src/main/utils/performance-trace.ts`, not in this launcher. Receipts keep `productChange: "none"`. A `retained` receipt does not authorize a product change.
 
-- Run with `bun scripts/generate-calendar-tray-icons.mjs` or Node.
-- Outputs tray icons to `src/assets/`: mac dark/light 18/36, Windows dark/light 16/32.
-- Outputs `build/icon.icns` via `iconutil` on macOS only; `build/icon.ico` via sharp on any OS.
-- Keep `sharp` in devDependencies when editing this script.
-- Do not hand-edit generated tray/icon assets.
+Fingerprint exclusions are fixed: `.omo/evidence/**`, `lib/**`, `dist/**`, `coverage/**`, `node_modules/**`, `.eslintcache`, `*.tsbuildinfo`.
 
-## `validate-node.mjs` Contract
+## Release
 
-- Enforces host Node major ≥ 26 (`.nvmrc`), then runs the icon generator under the same host Node.
-- `NODE_VALIDATE_SKIP_GENERATE=1` skips spawn for unit tests only.
-- Pure helpers exported for `tests/scripts/validate-node.test.ts`.
-- Host Node 26 is for contributor tooling — do not conflate with Electron's embedded runtime or lower `engines.node` (`>=20`).
+`package.json` owns the official version. Beta jobs rewrite that version in the CI checkout only; the tag points at the untouched `develop` commit. macOS verifier accepts helper exits 0, 2, or 3 and requires the dual-source `source.hash`. It stays strict for unsigned local builds. Official Windows artifacts are separate `package:win:x64` and `package:win:arm64` runs plus `merge:windows-latest-yml`.
 
-## `next-beta-tag.mjs` Contract
+## Tests
 
-- `computeNextBeta(base, tagList)` → `{ base, betaNumber, tag, appVersion }`.
-- Tag form: `vX.Y.Z-beta-N`; app version form: `X.Y.Z-beta.N`.
-- Used by `.github/workflows/beta-release.yml`; unit tests in `tests/scripts/next-beta-tag.test.ts`.
-
-## Release version ownership
-
-- Root `package.json` owns the official release version. The official release workflow creates the matching `v${package.json.version}` tag from `main` when needed.
-- `next-beta-tag.mjs` derives a beta tag and Electron-compatible beta app version from that package version. Beta tags are owned by `.github/workflows/beta-release.yml`.
-- The beta macOS and Windows jobs temporarily replace `package.json`'s version in their own CI checkouts before packaging. The beta tag points to the untouched `develop` commit, and the temporary mutation is never committed.
-
-## `verify-macos-release.mjs` Contract
-
-- macOS only; fail closed for missing/extra/wrong-version DMG/ZIP containers.
-- Attach DMG read-only / extract ZIP with `ditto`; check signing, hardened runtime, stapling, entitlements, **both** unpacked Swift sources:
-  - `…/app.asar.unpacked/src/main/googlemeet-events.swift`
-  - `…/app.asar.unpacked/src/main/swift/event-occurrence-identity.swift`
-- Swift cache smoke only from ZIP matching runner arch; isolated `TMPDIR`; accept helper exits `0`, `2`, or `3`.
-- `source.hash` must match SHA-256 of **identity + `"\n"` + events** (same order as runtime `readSwiftSource`).
-- `xcrun stapler validate` against the contained app only.
-- Native command execution injectable via `macos-release-verifier-native.mjs`; pure helpers unit-tested.
-
-## Anti-Patterns
-
-- Do not replace the TCP readiness check with fixed sleeps in `dev.ts`.
-- Do not remove stale-output cleanup; old `lib/` files cause Electron to launch stale code.
-- Do not hard-code a different dev-server port without updating BrowserWindow loading assumptions.
-- Do not hand-edit generated tray/icon assets when the script can regenerate them.
-- Do not swap `scripts/dev.ts` away from Bun or rewrite package scripts to npm/yarn/pnpm.
-- Do not add runtime shims to `validate-node.mjs` beyond `NODE_VALIDATE_SKIP_GENERATE`.
-- Do not make the official macOS verifier permissive for unsigned local builds.
+`tests/scripts/` covers validate-node, guardrails scan, beta tags, both release verifiers, latest.yml merge, and `performance-*.test.ts`. Bench fixtures are `calendar-parser-bench-fixtures.test.ts`. `bun run bench:calendar-parser` uses `vitest.bench.config.ts`, outside the workspace.

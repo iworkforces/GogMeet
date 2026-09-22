@@ -23,6 +23,8 @@ Vitest project `domain`: Node, no Electron, high coverage floors on `src/domain/
 
 ## RULES
 
-- Import from `src/domain/**` only (plus test helpers).
+- Import from `src/domain/**` only (plus test helpers). Do not import `electron` or `src/main`.
 - Assert on `Result` discriminants (`ok` / `kind`), not thrown strings.
 - Use `asTest*` helpers for known-good brands; call production validators for failure paths.
+- Suffix hosts (`.zoom.us`, `.webex.com`) belong to allowlist tests. `MEETING_URL_ALLOWLIST` is exact-host prefixes only.
+- Quiet-hours and settings migration stay here. IPC restart behavior stays in `tests/main`.

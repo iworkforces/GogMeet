@@ -29,7 +29,7 @@ Electron Builder resources and packaging hooks. Operational packaging code, not 
 - Official Windows artifacts: separate `--x64` and `--arm64` invocations (not dual-arch single NSIS).
 - Both Swift sources must stay in `files` and `asarUnpack` for mac packaged builds: `src/main/googlemeet-events.swift` and `src/main/swift/event-occurrence-identity.swift` (compile-on-device + dual-source integrity hash).
 - Do not hand-edit generated `icon.icns` / `icon.ico` / tray PNGs.
-- Keep `allow-jit`, Calendar, and Apple Events grants. `allow-unsigned-executable-memory` remains for Electron 43 + hardened runtime unless package smoke proves it can be removed.
+- Source plists grant `allow-jit`, Calendar, Apple Events, and `allow-unsigned-executable-memory`. The plist comment still says Electron 43; `package.json` depends on `electron` `^44.4.3`. `assertEntitlements` requires `allow-jit` and rejects `allow-unsigned-executable-memory` and `disable-library-validation` on the signed app. Do not add `disable-library-validation`.
 
 ## Anti-patterns
 

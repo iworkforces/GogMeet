@@ -1,81 +1,41 @@
 # Renderer Layer
 
-## OVERVIEW
-
-Vanilla TypeScript UI for three BrowserWindow contexts. No framework; HTML string templates with `escapeHtml()`. Types from `../shared/` and `../domain/`.
-
-Primary meeting list UX for users is the **native tray menu**; the main BrowserWindow (popover entry) may stay hidden while still receiving pushes for height/list experiments.
+Vanilla TypeScript for three BrowserWindows. No framework. HTML templates escape user strings with `escapeHtml()` from `shared/utils/escape-html.js`. The tray menu is the primary meeting list. This process must not import `src/main/`.
 
 ## ENTRY POINTS
 
-| Entry               | HTML                  | Window                                             | Role                                                      |
-| ------------------- | --------------------- | -------------------------------------------------- | --------------------------------------------------------- |
-| `index.ts`          | `index.html`          | 360×480 popover                                    | Meeting list, state machine, push updates, manual refresh |
-| `settings/index.ts` | `settings/index.html` | Settings 520×760, canvas `#0d1117` (Dock on macOS) | Full schema v3 prefs + calendar connect; auto-save        |
-| `alert/index.ts`    | `alert/index.html`    | Full-screen overlay                                | Dark overlay, fade+zoom; `alert:show` push                |
+| Entry | HTML | Window | Role |
+|-------|------|--------|------|
+| `index.ts` | `index.html` | Popover 360×480. `setHeight` clamps 220–480 | Meeting list |
+| `settings/index.ts` | `settings/index.html` | 520×760, canvas `#0d1117` | Schema v3, auto-save |
+| `alert/index.ts` | `alert/index.html` | Starts 500×480, clamps to 280–480. Page fill `#0d0d0d` | Alert card, fade and zoom |
+
+About and Update are main-process `data:` HTML, not renderer entries.
 
 ## STRUCTURE
 
-```text
-src/renderer/
-├── index.ts / index.html     # List UI entry (popover)
-├── env.d.ts / css.d.ts       # ambient Api + CSS/SVG module typings
-├── tsconfig.json
-├── events/                   # data-action event delegation
-├── lib/apply-events-push.ts  # tomorrow filter + content/display signature gate for pushes
-├── rendering/body.ts         # meeting list HTML
-├── settings/                 # Settings window (index.html/ts/css + env.d.ts)
-├── alert/                    # Full-screen alert (index.html/ts/css)
-├── styles/                   # CSS reset + list styles
-└── utils/dom.ts              # DOM query helpers only (escapeHtml is shared)
-```
+`events/delegation.ts` (`data-action`), `lib/apply-events-push.ts`, `rendering/body.ts`, `settings/`, `alert/`, `styles/`, `utils/dom.ts` (`queryRequiredElement` returns null on a tag mismatch).
 
-## LIST WINDOW
+## LIST
 
-- `AppState` lives in `src/shared/app-state.ts` and is imported by `index.ts` and `rendering/body.ts`.
-- Discriminated union (not a linear pipeline): `loading` \| `no-permission` \| `no-events` \| `has-events` \| `error`. Tray/settings phases `limited` / `offline-cached` are **`CalendarUiPhase`**, not popover `AppState`.
-- `loadEvents()` uses `window.api.calendar.getEvents()` → `CalendarPublication`; pushes deliver the same envelope via `onResultUpdated`.
-- Partial results render their retained events, or the ordinary no-events state when none remain. Renderer production never renders the native tray warning, diagnostic labels, or diagnostic count tokens.
-- Refresh/retry use the same `loadEvents()` path (no renderer force-poll IPC). `loadGeneration` ignores stale publications.
-- On show: always local `render()` with `Date.now()` so ended meetings drop immediately; network refresh is debounced separately (`lastPollTime` ≥5s).
-- Soft labels / end membership while open are refreshed by main display-horizon pushes (`CALENDAR_RESULT_UPDATED`), not a renderer interval.
-- List filter / “In progress” use domain `meeting-time` helpers (`end > now`, `start ≤ now < end`).
-- **Title display:** visible meeting titles use domain `truncateMiddle` with `MEETING_TITLE_DISPLAY_MAX_CHARS` (**25**, middle `…`). Full title stays on the span `title` tooltip and Join `aria-label`. Escape **after** truncate. CSS `.meeting-title` uses `min-width: 0` so flex cannot widen the 360px window.
-- **Completed today** (when `settings.showCompletedTodayMeetings`): after actionable rows, muted non-interactive history via `filterCompletedTodayMeetings` (same-local-day, newest-ended first). Renderer owns a presentation timer for the next event end or local midnight — re-render/re-arm only; no calendar/settings/join IPC.
-- `SETTINGS_CHANGED` for only the history toggle re-renders/re-arms without a full refresh path used for timing keys.
+`AppState` in `shared/app-state.ts`: `loading` | `no-permission` | `no-events` | `has-events` | `error`. Tray phases `limited` and `offline-cached` are not popover states. Partial results render retained events, or the ordinary empty state. No diagnostic labels or tokens.
 
-## EVENT HANDLING
+`loadEvents()` → `calendar.getEvents()`. `loadGeneration` drops stale publications. On show, `render()` uses `Date.now()` immediately; network refresh waits until `lastPollTime` is at least 5s old. `applyEventsPush` drops tomorrow unless `showTomorrowMeetings`, then compares `eventListSignature` (`description` excluded). `onResultUpdated` still calls `render()` when that signature is unchanged so clock labels move.
 
-- `events/delegation.ts` on `#app` with `data-action`.
-- Actions: `refresh`, `retry`, `grant-access`, `join-meeting` (uses **`data-event-id`**, not raw URL).
-- Join → `window.api.app.joinMeeting(eventId)`; failures show a temporary error banner (do not only `console.error`).
-- Completed history rows have **no** `data-action` / event id / join control.
+Visible titles use `truncateMiddle` at 25, then `escapeHtml`. CSS `.meeting-title` sets `min-width: 0`. Completed-today rows (when enabled) are muted, have no join control, and re-render from a local timer at the next end or local midnight. Popover `filterUpcomingMeetings` keeps all-day events. The tray passes `excludeAllDay: true`.
 
-## SETTINGS WINDOW (schema v3)
+Actions on `#app`: `refresh`, `retry`, `grant-access`, `join-meeting` via `data-event-id`. Join failures show a banner.
 
-- Visual system: System Settings–inspired **grouped inset lists** on fixed product canvas **`#0d1117`** (groups `#161b22`); dark `color-scheme`; prefers-contrast / reduced-motion.
-- Brand mark: 72px app icon with aurora under the title bar (`.settings-brand`); imports `about-icon.svg` + injects `APP_ICON_AURORA_CSS` once (`#app-icon-aurora-styles`). Uses shared **base** aurora tier (calmer than About/Update fancy). Same helper powers About (96px) and Update (88px) with `.app-icon-aurora--about`.
-- Sections: **Calendar** · **Joining Meetings** · **Tray Menu** · **General** (`settings/index.ts` + `settings/styles.css`).
-- Calendar: **platform-gated** — Darwin shows EventKit status only; Windows shows Connect/Disconnect Google (user-facing copy when OAuth is not baked in). `getUiState` / `requestPermission` / `disconnect`; `escapeHtml` for email + lastError + save errors.
-- Prefs auto-save: toggle / select / time → `window.api.settings.set()` → "Saved" (concurrent saves coalesced).
-- Joining fields: `autoOpenEnabled`, `openBeforeMinutes` (0–10), `windowAlert` (Meeting Alert), `alertLeadSeconds`, `nativeNotifications`, `lateJoinGraceMinutes`, `quietHoursEnabled` + `quietHoursStart`/`End` (`HH:mm`). Quiet hours copy states alerts/notifications only (auto-open continues; times may wrap midnight). Dependents disable when Auto-Open / Meeting Alert / Quiet Hours are off.
-- Toggles use native checkboxes (styled track); no hybrid `role="switch"`.
-- Save failure reverts toggle + shows escaped error (`role="alert"`).
-- Hide-cache soft-refresh: `visibilitychange` → re-`get()` settings + calendar UI; `settings.onChanged` re-renders when idle.
-- Tray Menu: tomorrow + completed history (display-only completed rebuilds tray without scheduler restart).
+## SETTINGS
 
-## ALERT WINDOW
+Every `AppSettings` field except `schemaVersion` auto-saves. One `settings.set` is in flight; later edits merge into `pendingSave`. A failed save rejects those waiters, reverts the toggle, and escapes the error. Resync and `onChanged` do not render while `isSaving`. Resync also skips while `isCalendarBusy`. Dependents disable when Auto-Open, Meeting Alert, or Quiet Hours is off. Toggles are native checkboxes. Darwin versus Google is `/Mac/i/` and not `/Win|Windows/i/` on the user agent. Every other host gets the Google block. Brand mark is the aurora base tier. `settings/styles.css` only adds `margin-top: 2px` on `--settings` and forces dark `#0d1117`. `color-scheme` meta says `light dark`.
 
-- Payload: `AlertPayload` with optional `hasMeetUrl` / `autoOpenAt` — **no meetUrl string**.
-- Join when `hasMeetUrl` → `app.joinMeeting(id)`; on failure keep the alert open with an error banner; dismiss only after success.
-- Dismiss → `alert.notifyDismissed(id)` (cancels pending auto-open).
-- Escape dismisses.
-- Main reuses a hidden BrowserWindow across presentations (see `main/windows/AGENTS.md`); renderer still fully re-renders from each `ALERT_SHOW` push.
+## ALERT
 
-## CONVENTIONS / ANTI-PATTERNS
+Payload has `hasMeetUrl` and optional `autoOpenAt`, and no `meetUrl`. `alert/index.ts` does not read `autoOpenAt`. Join uses `app.joinMeeting(id)` and keeps the card open on failure. Dismiss calls `alert.notifyDismissed(id)`. Escape dismisses. Main owns hide/reuse (`windows/AGENTS.md`).
 
-- Always `escapeHtml` user content in templates (including completed-history titles). Import from **`shared/utils/escape-html.js`** (not a renderer-local util).
-- Never put meeting URLs in alert payloads or join buttons as openable strings.
-- Full re-render on state change; no cross-render DOM refs.
-- Never import from `src/main/`.
-- Do not drive completed-history invalidation via calendar poll — use the local presentation timer + settings push + horizon pushes.
+## RULES
+
+- Escape user strings in templates, including history titles. Banners that use `textContent` do not need `escapeHtml`.
+- Full re-render on state change. The settings toggle save keeps the input across that save and must not render while `isSaving`.
+- History expiry uses the local timer plus settings and horizon pushes, not an extra calendar poll.

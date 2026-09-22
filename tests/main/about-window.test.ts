@@ -197,6 +197,7 @@ describe("about-window", () => {
     await Promise.resolve();
 
     const scripts = win?.webContents.executeJavaScript.mock.calls.map((c) => String(c[0] ?? "")) ?? [];
+    expect(scripts.some((s) => s.includes("blur"))).toBe(true);
     expect(scripts.every((s) => !s.includes("repo-link") && !s.includes("about-close"))).toBe(true);
     expect(win?.focus).toHaveBeenCalled();
   });
@@ -458,7 +459,8 @@ describe("about-window", () => {
     if (!win) return;
     win.webContents.executeJavaScript.mockRejectedValue(new Error("focus fail"));
     win.isVisible.mockReturnValue(false);
-    showAbout({} as never);
+    expect(() => showAbout({} as never)).not.toThrow();
+    expect(win.webContents.executeJavaScript).toHaveBeenCalled();
     await Promise.resolve();
   });
 

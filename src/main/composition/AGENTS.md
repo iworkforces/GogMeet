@@ -19,7 +19,7 @@ This directory is the main-process composition root. It builds graph-local depen
 
 ## Construction and probe use
 
-- `createAppGraph(overrides?: AppGraphOverrides)` is pure dependency wiring apart from lazy adapter creation. It constructs graph-local calendar, settings, scheduler, join, watcher, and one exact opener. It finalizes each override before downstream closures use it, and does not initiate a calendar request, OAuth flow, or eager settings write.
+- `createAppGraph(overrides?: AppGraphOverrides)` is dependency wiring. It constructs the opener and the JSON settings store immediately. The calendar provider stays lazy inside the facade. It builds graph-local calendar, settings, scheduler, join, watcher, and one opener. It finalizes each override before downstream closures use it, and does not initiate a calendar request, OAuth flow, or eager settings write.
 - The same opener object is exposed as `graph.opener` and injected into both scheduler auto-open work and the explicit join use case.
 - Normal lifecycle calls it once before IPC. Pass the resulting graph to tray, IPC handlers, and shortcuts rather than rebuilding surfaces at each boundary.
 - The tray packaged probe also creates the production graph so it exercises production tray setup and callbacks, but supplies synthetic events and calendar UI snapshots through the main bus.
