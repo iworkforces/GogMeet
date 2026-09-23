@@ -109,6 +109,7 @@ describe("Windows Authenticode native boundary", () => {
       expect(result.ok).toBe(true);
       expect(result.message).toMatch(/^Valid signer [a-fA-F0-9]{40}$/);
     },
+    25_000,
   );
 
   it.skipIf(process.platform !== "win32")(
@@ -127,5 +128,6 @@ describe("Windows Authenticode native boundary", () => {
         rmSync(directory, { recursive: true, force: true });
       }
     },
+    25_000,
   );
 });

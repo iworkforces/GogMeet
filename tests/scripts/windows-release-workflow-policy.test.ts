@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const workflows = [
@@ -51,22 +53,28 @@ describe.each(workflows)("%s Windows release policy", (file, jobName) => {
 
     const script = signing.match(/^        run: \|\n([\s\S]*)$/m)?.[1]?.replace(/^ {10}/gm, "");
     expect(script).toBeDefined();
-    const result = spawnSync("bash", ["-c", script ?? ""], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        WIN_CSC_LINK: link,
-        WIN_CSC_KEY_PASSWORD: password,
-        GITHUB_ENV: "/dev/stdout",
-      },
-    });
+    const directory = mkdtempSync(join(tmpdir(), "gogmeet-win-signing-policy-"));
+    try {
+      const envFile = join(directory, "github-env");
+      writeFileSync(envFile, "");
+      const result = spawnSync("bash", ["-c", script ?? ""], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          WIN_CSC_LINK: link,
+          WIN_CSC_KEY_PASSWORD: password,
+          GITHUB_ENV: envFile.replaceAll("\\", "/"),
+        },
+      });
 
-    expect(result.status).toBe(0);
-    expect(
-      result.stdout
-        .split("\n")
-        .filter((line) => /^(CSC_LINK|CSC_KEY_PASSWORD|REQUIRE_WIN_SIGN)=/.test(line)),
-    ).toEqual(expected);
+      expect(
+        result.status,
+        `bash status ${result.status}, error: ${result.error?.message ?? "none"}, stderr: ${result.stderr}`,
+      ).toBe(0);
+      expect(readFileSync(envFile, "utf8").split("\n")).toEqual([...expected, ""]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("builds both arches, merges updater metadata, verifies before checksums and upload", () => {
