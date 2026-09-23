@@ -13,10 +13,11 @@
  * Exit 0 on success; non-zero with a clear message on failure.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyWindowsLatestYml } from "./windows-latest-yml-verifier.mjs";
+import { verifyWindowsAuthenticode } from "./windows-authenticode-verifier.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(root, "dist");
@@ -44,7 +45,7 @@ export function expectedWindowsArtifacts(version) {
 }
 
 /**
- * @param {{ distDir?: string, requireUpdaterYml?: boolean, files?: string[] }} opts
+ * @param {{ distDir?: string, requireUpdaterYml?: boolean, requireWinSign?: boolean, files?: string[], verifySignature?: typeof verifyWindowsAuthenticode }} opts
  */
 export function verifyWindowsReleaseInventory(opts = {}) {
   const dir = opts.distDir ?? distDir;
@@ -111,6 +112,42 @@ export function verifyWindowsReleaseInventory(opts = {}) {
         missing: [],
         message: validation.message,
       };
+    }
+  }
+
+  if (opts.requireWinSign === true || process.env["REQUIRE_WIN_SIGN"] === "1") {
+    for (const name of expected) {
+      const full = join(dir, name);
+      let signature;
+      try {
+        if (lstatSync(full).isSymbolicLink()) {
+          return {
+            ok: false,
+            version,
+            expected,
+            missing: [],
+            message: `Windows artifact is a symlink: ${name}`,
+          };
+        }
+        signature = (opts.verifySignature ?? verifyWindowsAuthenticode)(full);
+      } catch (error) {
+        return {
+          ok: false,
+          version,
+          expected,
+          missing: [],
+          message: `Windows signature check failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (!signature.ok) {
+        return {
+          ok: false,
+          version,
+          expected,
+          missing: [],
+          message: `Invalid Windows signature for ${name}: ${signature.message}`,
+        };
+      }
     }
   }
 

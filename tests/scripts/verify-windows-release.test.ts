@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -81,6 +81,82 @@ describe("verify-windows-release", () => {
       message: `OK: 4 Windows artifacts present for v${version}`,
     });
   });
+
+  it("checks each of the four exact artifacts when signing is required", () => {
+    const checked: string[] = [];
+    const result = verifyWindowsReleaseInventory({
+      distDir,
+      requireWinSign: true,
+      verifySignature: (path: string) => {
+        checked.push(path);
+        return { ok: true, message: "Valid signer" };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(checked).toEqual(expectedWindowsArtifacts(version).map((name) => join(distDir, name)));
+  });
+
+  it.each([x64Name, arm64Name, x64PortableName, arm64PortableName])(
+    "rejects a failed signature for %s",
+    (failedName) => {
+      const checked: string[] = [];
+      const result = verifyWindowsReleaseInventory({
+        distDir,
+        requireWinSign: true,
+        verifySignature: (path: string) => {
+          checked.push(path);
+          return path === join(distDir, failedName)
+            ? { ok: false, message: "NotSigned" }
+            : { ok: true, message: "Valid signer" };
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(failedName);
+      expect(checked.at(-1)).toBe(join(distDir, failedName));
+    },
+  );
+
+  it("identifies the artifact when the native checker throws", () => {
+    const result = verifyWindowsReleaseInventory({
+      distDir,
+      requireWinSign: true,
+      verifySignature: () => {
+        throw new Error("native process failure");
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(x64Name);
+  });
+
+  it("does not check signatures when signing is optional", () => {
+    const result = verifyWindowsReleaseInventory({
+      distDir,
+      verifySignature: () => {
+        throw new Error("Signature check was unexpectedly invoked");
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects a symlinked artifact before native verification",
+    () => {
+      rmSync(join(distDir, arm64Name));
+      symlinkSync(join(distDir, x64Name), join(distDir, arm64Name));
+      const result = verifyWindowsReleaseInventory({
+        distDir,
+        requireWinSign: true,
+        verifySignature: () => ({ ok: true, message: "Valid signer" }),
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(arm64Name);
+    },
+  );
 
   const invalidMetadataCases = [
     {
