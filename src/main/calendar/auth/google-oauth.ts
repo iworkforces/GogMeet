@@ -10,9 +10,10 @@ import { URL } from "node:url";
 
 import { getGoogleOAuthClientId, isGoogleOAuthConfigured } from "./google-client-id.js";
 import {
-  clearGoogleTokens,
+  clearGoogleTokensIfCurrent,
   loadGoogleTokensResult,
   saveGoogleTokens,
+  saveGoogleTokensIfCurrent,
   type GoogleTokenFileV1,
 } from "./google-token-store.js";
 import {
@@ -185,7 +186,7 @@ function mapHttpErrorToRefreshResult(err: GoogleHttpError): GoogleTokenRefreshRe
 
 async function performNetworkRefresh(
   tokens: GoogleTokenFileV1,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<GoogleTokenRefreshResult> {
   const clientId = getGoogleOAuthClientId();
   if (clientId.length === 0) {
@@ -200,9 +201,6 @@ async function performNetworkRefresh(
 
   // Shared refresh is bounded by its own 15s transport deadline + lifecycle abort.
   // Caller/poll abort must not cancel the shared flight (only the waiter).
-  const composed =
-    signal !== undefined ? AbortSignal.any([lifecycleAbort.signal, signal]) : lifecycleAbort.signal;
-
   let json: Record<string, unknown>;
   try {
     json = (await googleHttpJson({
@@ -210,14 +208,25 @@ async function performNetworkRefresh(
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
-      signal: composed,
+      signal,
     })) as Record<string, unknown>;
   } catch (err) {
+    if (signal.aborted) return { kind: "transient", reason: "abort" };
     if (err instanceof GoogleHttpError) {
       const mapped = mapHttpErrorToRefreshResult(err);
       if (mapped.kind === "invalidated") {
-        console.warn("[calendar:auth] Refresh invalidated grant; clearing tokens");
-        await clearGoogleTokens();
+        try {
+          const cleared = await clearGoogleTokensIfCurrent(tokens, () => !signal.aborted);
+          if (signal.aborted) return { kind: "transient", reason: "abort" };
+          if (!cleared) return { kind: "transient", reason: "storage" };
+          console.warn("[calendar:auth] Refresh invalidated grant; clearing tokens");
+        } catch (storageError) {
+          console.warn(
+            "[calendar:auth] Refresh invalidated grant but clearing failed:",
+            storageError,
+          );
+          return { kind: "transient", reason: "storage" };
+        }
       } else {
         console.warn("[calendar:auth] Refresh failed (credentials preserved):", err.errorClass);
       }
@@ -226,6 +235,8 @@ async function performNetworkRefresh(
     console.warn("[calendar:auth] Refresh failed (credentials preserved):", err);
     return { kind: "transient", reason: "network" };
   }
+
+  if (signal.aborted) return { kind: "transient", reason: "abort" };
 
   const accessToken = json["access_token"];
   const expiresIn = json["expires_in"];
@@ -244,7 +255,9 @@ async function performNetworkRefresh(
   };
 
   try {
-    await saveGoogleTokens(next);
+    const saved = await saveGoogleTokensIfCurrent(tokens, next, () => !signal.aborted);
+    if (signal.aborted) return { kind: "transient", reason: "abort" };
+    if (!saved) return { kind: "transient", reason: "storage" };
   } catch (err) {
     console.warn(
       "[calendar:auth] Refresh succeeded but persistence failed; discarding unpersisted token:",
@@ -253,6 +266,8 @@ async function performNetworkRefresh(
     // Prior ciphertext left untouched by failed write.
     return { kind: "transient", reason: "storage" };
   }
+
+  if (signal.aborted) return { kind: "transient", reason: "abort" };
 
   return { kind: "ok", tokens: next, didRefresh: true };
 }
@@ -273,6 +288,8 @@ function startRefreshFlight(tokens: GoogleTokenFileV1): Promise<GoogleTokenRefre
 async function runForceFollowUp(): Promise<GoogleTokenRefreshResult> {
   if (forceFollowUp) return forceFollowUp;
 
+  const signal = lifecycleAbort.signal;
+
   const flight = (async (): Promise<GoogleTokenRefreshResult> => {
     // Wait for any active if-needed/network flight to finish first.
     if (refreshInFlight) {
@@ -282,7 +299,9 @@ async function runForceFollowUp(): Promise<GoogleTokenRefreshResult> {
         // ignore
       }
     }
+    if (signal.aborted) return { kind: "transient", reason: "abort" };
     const loaded = await loadGoogleTokensResult();
+    if (signal.aborted) return { kind: "transient", reason: "abort" };
     if (loaded.kind !== "ok") {
       return loaded.reason === "missing"
         ? { kind: "no-tokens" }
@@ -340,15 +359,21 @@ export async function refreshGoogleAccessToken(
   mode: GoogleRefreshMode = "if-needed",
   callerSignal?: AbortSignal,
 ): Promise<GoogleTokenRefreshResult> {
+  const requestLifecycle = lifecycleAbort.signal;
   if (mode === "force") {
     if (refreshInFlight) {
       const joined = await awaitSharedWithCallerAbort(refreshInFlight, callerSignal);
       if (joined.kind === "ok" && joined.didRefresh) {
         return joined;
       }
-      if (joined.kind === "transient" && joined.reason === "abort" && callerSignal?.aborted) {
+      if (
+        joined.kind === "transient" &&
+        joined.reason === "abort" &&
+        (callerSignal?.aborted || requestLifecycle.aborted)
+      ) {
         return joined;
       }
+      if (requestLifecycle.aborted) return { kind: "transient", reason: "abort" };
       // In-flight was not a successful refresh for this force caller — one follow-up.
       return awaitSharedWithCallerAbort(runForceFollowUp(), callerSignal);
     }
@@ -358,6 +383,7 @@ export async function refreshGoogleAccessToken(
     }
 
     const loaded = await loadGoogleTokensResult();
+    if (requestLifecycle.aborted) return { kind: "transient", reason: "abort" };
     if (loaded.kind !== "ok") {
       if (loaded.reason === "missing") return { kind: "no-tokens" };
       return { kind: "transient", reason: "storage" };
@@ -367,6 +393,7 @@ export async function refreshGoogleAccessToken(
 
   // if-needed
   const loaded = await loadGoogleTokensResult();
+  if (requestLifecycle.aborted) return { kind: "transient", reason: "abort" };
   if (loaded.kind !== "ok") {
     if (loaded.reason === "missing") return { kind: "no-tokens" };
     return { kind: "transient", reason: "storage" };
@@ -404,6 +431,7 @@ export async function ensureFreshGoogleAccessToken(
 export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-determined"> {
   if (oauthInFlight) return oauthInFlight;
 
+  const signal = lifecycleAbort.signal;
   oauthInFlight = (async () => {
     if (!isGoogleOAuthConfigured()) {
       console.error("[calendar:auth] GOOGLE_OAUTH_CLIENT_ID is not set");
@@ -416,13 +444,21 @@ export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-
     const state = generateState();
 
     let server: Server | null = null;
+    let activeResponse: ServerResponse | null = null;
     let settled = false;
+    const isLive = (): boolean => !settled && !signal.aborted;
 
     const result = await new Promise<"granted" | "denied" | "not-determined">((resolve) => {
       const finish = (value: "granted" | "denied" | "not-determined"): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        if (activeResponse && !activeResponse.writableEnded) {
+          activeResponse.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          activeResponse.end(htmlPage("Connection cancelled", "Return to GogMeet and try again."));
+        }
+        activeResponse = null;
         if (server) {
           server.close();
           server = null;
@@ -434,6 +470,8 @@ export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-
         console.warn("[calendar:auth] OAuth timed out");
         finish("not-determined");
       }, OAUTH_TIMEOUT_MS);
+      const onAbort = (): void => finish("not-determined");
+      signal.addEventListener("abort", onAbort, { once: true });
 
       server = createServer((req: IncomingMessage, res: ServerResponse) => {
         void (async () => {
@@ -480,13 +518,17 @@ export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-
             const redirectUri = `http://127.0.0.1:${addr.port}/oauth/callback`;
 
             try {
+              activeResponse = res;
               const tokens = await exchangeCode({
                 code,
                 redirectUri,
                 codeVerifier,
                 clientId,
               });
-              await saveGoogleTokens(tokens);
+              if (!isLive()) return;
+              await saveGoogleTokens(tokens, isLive);
+              if (!isLive()) return;
+              activeResponse = null;
               res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
               res.end(
                 htmlPage(
@@ -496,7 +538,9 @@ export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-
               );
               finish("granted");
             } catch (exchangeErr) {
+              if (!isLive()) return;
               console.error("[calendar:auth] Token exchange failed:", exchangeErr);
+              activeResponse = null;
               res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
               res.end(
                 htmlPage(
@@ -520,6 +564,7 @@ export async function runGooglePkceLogin(): Promise<"granted" | "denied" | "not-
       });
 
       server.listen(0, "127.0.0.1", () => {
+        if (!isLive()) return;
         const addr = server?.address();
         if (!addr || typeof addr === "string") {
           finish("denied");

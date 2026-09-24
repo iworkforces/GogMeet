@@ -114,18 +114,17 @@ describe("google-sync-tokens", () => {
     expect(await loadGoogleSyncTokens()).toEqual({ primary: "plain-tok" });
   });
 
-  it("swallows save failures when encryption is unavailable in packaged builds", async () => {
+  it("reports save failures when encryption is unavailable in packaged builds", async () => {
     appState.isPackaged = true;
     encryptionOn.value = false;
     delete process.env["GOGMEET_ALLOW_PLAINTEXT_TOKENS"];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { saveGoogleSyncTokens, loadGoogleSyncTokens } = await import(
       "../../src/main/calendar/auth/google-sync-tokens.js"
     );
-    await saveGoogleSyncTokens({ primary: "x" });
-    expect(warn).toHaveBeenCalled();
+    await expect(saveGoogleSyncTokens({ primary: "x" })).rejects.toThrow(
+      "OS secure storage unavailable",
+    );
     expect(await loadGoogleSyncTokens()).toEqual({});
-    warn.mockRestore();
   });
 
   it("treats encryptionAvailable throw as unavailable", async () => {

@@ -39,6 +39,22 @@ export type GoogleTokenLoadResult =
   | { kind: "ok"; tokens: GoogleTokenFileV1 }
   | { kind: "err"; reason: GoogleTokenLoadFailureReason; preservedCiphertext: boolean };
 
+const pendingMutations = new Map<string, Promise<void>>();
+
+function serializeMutation<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const previous = pendingMutations.get(path);
+  const current = previous ? previous.then(operation) : operation();
+  const settled = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  pendingMutations.set(path, settled);
+  void settled.then(() => {
+    if (pendingMutations.get(path) === settled) pendingMutations.delete(path);
+  });
+  return current;
+}
+
 function authDir(): string {
   return join(app.getPath("userData"), "calendar-auth");
 }
@@ -131,18 +147,7 @@ function parseTokenFile(
   };
 }
 
-/**
- * Load tokens with typed failure. Never unlinks the ciphertext file on
- * decrypt/malformed/schema/client/secure-storage failures.
- */
-export async function loadGoogleTokensResult(): Promise<GoogleTokenLoadResult> {
-  let buf: Buffer;
-  try {
-    buf = await readFile(tokenPath());
-  } catch {
-    return { kind: "err", reason: "missing", preservedCiphertext: false };
-  }
-
+function decodeTokenFile(buf: Buffer): GoogleTokenLoadResult {
   if (!encryptionAvailable() && !allowPlaintextDev()) {
     return { kind: "err", reason: "secure-storage-unavailable", preservedCiphertext: true };
   }
@@ -171,10 +176,62 @@ export async function loadGoogleTokensResult(): Promise<GoogleTokenLoadResult> {
   return { kind: "ok", tokens: tokens.tokens };
 }
 
+/**
+ * Load tokens with typed failure. Never unlinks the ciphertext file on
+ * decrypt/malformed/schema/client/secure-storage failures.
+ */
+export async function loadGoogleTokensResult(): Promise<GoogleTokenLoadResult> {
+  let buf: Buffer;
+  try {
+    buf = await readFile(tokenPath());
+  } catch {
+    return { kind: "err", reason: "missing", preservedCiphertext: false };
+  }
+  return decodeTokenFile(buf);
+}
+
 /** Load tokens or null. Invalid/unreadable files are preserved, not deleted. */
 export async function loadGoogleTokens(): Promise<GoogleTokenFileV1 | null> {
   const result = await loadGoogleTokensResult();
   return result.kind === "ok" ? result.tokens : null;
+}
+
+function sameTokens(left: GoogleTokenFileV1, right: GoogleTokenFileV1): boolean {
+  return (
+    left.authSchemaVersion === right.authSchemaVersion &&
+    left.clientId === right.clientId &&
+    left.accessToken === right.accessToken &&
+    left.refreshToken === right.refreshToken &&
+    left.expiryMs === right.expiryMs &&
+    left.email === right.email &&
+    left.scope === right.scope
+  );
+}
+
+async function currentTokensMatch(path: string, expected: GoogleTokenFileV1): Promise<boolean> {
+  let buf: Buffer;
+  try {
+    buf = await readFile(path);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+  const result = decodeTokenFile(buf);
+  return result.kind === "ok" && sameTokens(result.tokens, expected);
+}
+
+async function persistTokens(
+  path: string,
+  tokens: GoogleTokenFileV1,
+  canPersist?: () => boolean,
+): Promise<boolean> {
+  if (canPersist && !canPersist()) return false;
+  await ensureSecureDir(authDir());
+  if (canPersist && !canPersist()) return false;
+  const encoded = encodePayload(JSON.stringify(tokens));
+  if (canPersist && !canPersist()) return false;
+  await writeSecureFile(path, encoded);
+  return true;
 }
 
 /** Persist tokens (encrypted when available). */
@@ -182,6 +239,7 @@ export async function saveGoogleTokens(
   tokens: Omit<GoogleTokenFileV1, "authSchemaVersion" | "clientId"> & {
     clientId?: string;
   },
+  canPersist?: () => boolean,
 ): Promise<void> {
   const clientId = tokens.clientId ?? getGoogleOAuthClientId();
   if (clientId.length === 0) {
@@ -198,16 +256,46 @@ export async function saveGoogleTokens(
     ...(tokens.scope !== undefined ? { scope: tokens.scope } : {}),
   };
 
-  await ensureSecureDir(authDir());
-  const encoded = encodePayload(JSON.stringify(payload));
-  await writeSecureFile(tokenPath(), encoded);
+  const path = tokenPath();
+  await serializeMutation(path, async () => {
+    await persistTokens(path, payload, canPersist);
+  });
+}
+
+export async function saveGoogleTokensIfCurrent(
+  expected: GoogleTokenFileV1,
+  next: GoogleTokenFileV1,
+  isLive?: () => boolean,
+): Promise<boolean> {
+  const path = tokenPath();
+  return serializeMutation(path, async () => {
+    if (!(await currentTokensMatch(path, expected))) return false;
+    return persistTokens(path, next, isLive);
+  });
+}
+
+export async function clearGoogleTokensIfCurrent(
+  expected: GoogleTokenFileV1,
+  isLive?: () => boolean,
+): Promise<boolean> {
+  const path = tokenPath();
+  return serializeMutation(path, async () => {
+    if (!(await currentTokensMatch(path, expected))) return false;
+    if (isLive && !isLive()) return false;
+    await unlink(path);
+    return true;
+  });
 }
 
 /** Delete token file if present. */
 export async function clearGoogleTokens(): Promise<void> {
-  try {
-    await unlink(tokenPath());
-  } catch {
-    // ignore missing
-  }
+  const path = tokenPath();
+  await serializeMutation(path, async () => {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+  });
 }
