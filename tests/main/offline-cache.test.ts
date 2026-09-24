@@ -35,8 +35,10 @@ vi.mock("electron", () => ({
 
 describe("offline-cache", () => {
   let dir: string;
+  let originalTimezone: string | undefined;
 
   beforeEach(async () => {
+    originalTimezone = process.env["TZ"];
     dir = await mkdtemp(join(tmpdir(), "gogmeet-cache-"));
     appState.userData = dir;
     appState.isPackaged = false;
@@ -53,6 +55,8 @@ describe("offline-cache", () => {
   });
 
   afterEach(async () => {
+    if (originalTimezone === undefined) delete process.env["TZ"];
+    else process.env["TZ"] = originalTimezone;
     delete process.env["GOGMEET_ALLOW_PLAINTEXT_TOKENS"];
     await rm(dir, { recursive: true, force: true });
   });
@@ -156,6 +160,51 @@ describe("offline-cache", () => {
     const loaded = await loadOfflineCache();
     expect(loaded).not.toBeNull();
     expect(loaded!.events).toEqual([]);
+  });
+
+  it("keeps date-only events through the final local day while timed events end at their UTC instant", async () => {
+    process.env["TZ"] = "America/Los_Angeles";
+    const { saveOfflineCache, loadOfflineCache } =
+      await import("../../src/main/calendar/offline-cache.js");
+    const exclusiveEnd = asTestIsoUtc("2026-07-28T00:00:00.000Z");
+    const allDay = createMockEvent({
+      id: asTestEventId("all-day"),
+      isAllDay: true,
+      startDate: asTestIsoUtc("2026-07-27T00:00:00.000Z"),
+      endDate: exclusiveEnd,
+    });
+    const timed = createMockEvent({
+      id: asTestEventId("timed"),
+      startDate: asTestIsoUtc("2026-07-27T23:00:00.000Z"),
+      endDate: exclusiveEnd,
+    });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-07-27T00:00:00.000Z"));
+    await saveOfflineCache([allDay, timed]);
+    clock.mockRestore();
+
+    expect((await loadOfflineCache(Date.parse("2026-07-28T00:00:00.000Z")))?.events).toEqual([
+      allDay,
+    ]);
+    expect((await loadOfflineCache(Date.parse("2026-07-28T07:00:00.000Z")))?.events).toEqual([]);
+  });
+
+  it("expires date-only events at local midnight after the DST fall-back day", async () => {
+    process.env["TZ"] = "America/Los_Angeles";
+    const { saveOfflineCache, loadOfflineCache } =
+      await import("../../src/main/calendar/offline-cache.js");
+    const allDay = createMockEvent({
+      isAllDay: true,
+      startDate: asTestIsoUtc("2026-11-01T00:00:00.000Z"),
+      endDate: asTestIsoUtc("2026-11-02T00:00:00.000Z"),
+    });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-01T00:00:00.000Z"));
+    await saveOfflineCache([allDay]);
+    clock.mockRestore();
+
+    expect((await loadOfflineCache(Date.parse("2026-11-02T07:59:59.999Z")))?.events).toEqual([
+      allDay,
+    ]);
+    expect((await loadOfflineCache(Date.parse("2026-11-02T08:00:00.000Z")))?.events).toEqual([]);
   });
 
   it("returns null for corrupt payload", async () => {
