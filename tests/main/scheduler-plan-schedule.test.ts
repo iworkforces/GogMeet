@@ -243,7 +243,7 @@ describe("planSchedule", () => {
     expect(startAction).toMatchObject({ type: "start-in-meeting", endMs: newEnd });
   });
 
-  it("suppresses alert under quiet hours but still arms browser", () => {
+  it("arms enabled alert and notification during quiet hours", () => {
     const start = now + 10 * 60_000;
     const event = createMockEvent({
       id: asTestEventId("e1"),
@@ -251,20 +251,79 @@ describe("planSchedule", () => {
       endDate: new Date(start + 30 * 60_000).toISOString(),
       meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
     });
-    // 12:00 UTC — use local quiet hours that cover "now"
-    const local = new Date(now);
-    const hh = String(local.getHours()).padStart(2, "0");
     const quietSettings = {
       ...settings,
       quietHoursEnabled: true,
       quietHoursStart: "00:00",
       quietHoursEnd: "23:59",
     };
-    void hh;
     const plan = planSchedule([event], quietSettings, now, emptySnapshot(), {
       lateJoinGraceMs: 0,
     });
-    expect(plan.actions.some((a) => a.type === "arm-alert")).toBe(false);
-    expect(plan.actions.some((a) => a.type === "arm-browser")).toBe(true);
+    expect(plan.actions.find((action) => action.type === "arm-alert")).toMatchObject({ event });
+    expect(plan.actions.find((action) => action.type === "arm-browser")).toMatchObject({
+      event,
+      notify: true,
+    });
+  });
+
+  it("does not arm disabled or previously fired alerts and keeps notifications disabled", () => {
+    const start = now + 10 * 60_000;
+    const event = createMockEvent({
+      id: asTestEventId("e1"),
+      startDate: new Date(start).toISOString(),
+      endDate: new Date(start + 30 * 60_000).toISOString(),
+      meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
+    });
+    const disabled = { ...settings, windowAlert: false, nativeNotifications: false };
+    const plan = planSchedule([event], disabled, now, emptySnapshot(), { lateJoinGraceMs: 0 });
+    const fired = planSchedule(
+      [event],
+      settings,
+      now,
+      emptySnapshot({ alertFiredEvents: new Map([[event.id, now]]) }),
+      { lateJoinGraceMs: 0 },
+    );
+
+    expect(plan.actions.some((action) => action.type === "arm-alert")).toBe(false);
+    expect(plan.actions.find((action) => action.type === "arm-browser")).toMatchObject({
+      notify: false,
+    });
+    expect(fired.actions.some((action) => action.type === "arm-alert")).toBe(false);
+  });
+
+  it("uses only the notification flag for late join during quiet hours", () => {
+    const start = now - 60_000;
+    const event = createMockEvent({
+      id: asTestEventId("late"),
+      startDate: new Date(start).toISOString(),
+      endDate: new Date(start + 30 * 60_000).toISOString(),
+      meetUrl: asTestMeetUrl("https://meet.google.com/abc-def-ghi"),
+    });
+    const quietSettings = {
+      ...settings,
+      quietHoursEnabled: true,
+      quietHoursStart: "00:00",
+      quietHoursEnd: "23:59",
+    };
+    const enabled = planSchedule([event], quietSettings, now, emptySnapshot(), {
+      lateJoinGraceMs: 120_000,
+    });
+    const disabled = planSchedule(
+      [event],
+      { ...quietSettings, nativeNotifications: false },
+      now,
+      emptySnapshot(),
+      { lateJoinGraceMs: 120_000 },
+    );
+
+    expect(enabled.actions.find((action) => action.type === "arm-browser")).toMatchObject({
+      event,
+      delayMs: 0,
+      notify: true,
+    });
+    expect(disabled.actions.find((action) => action.type === "arm-browser")).toMatchObject({
+      notify: false,
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Notification } from "electron";
 import type { MeetingEvent } from "../../domain/entities/meeting-event.js";
 import type { EventId } from "../../domain/entities/brand.js";
+import { isInQuietHours } from "../../domain/entities/settings.js";
 import { FIRED_EVENT_TTL_MS } from "./state/state-timers.js";
 import { buildMeetUrl } from "../../domain/services/build-meet-url.js";
 import type { SchedulerRuntime } from "./runtime.js";
@@ -34,10 +35,16 @@ export function scheduleBrowserTimer(
   graceMs: number,
   options: BrowserTimerOptions = {},
 ): void {
-  const { timers, firedEvents } = runtime.state;
-  const showNativeNotification = options.nativeNotifications !== false;
+  const state = runtime.state;
+  const { timers, firedEvents } = state;
+  const generation = runtime.lifecycleGeneration;
   const handle = setTimeout(() => {
-    if (timers.get(event.id) !== handle) return;
+    if (
+      runtime.state !== state ||
+      runtime.lifecycleGeneration !== generation ||
+      timers.get(event.id) !== handle
+    )
+      return;
     timers.delete(event.id);
     const now = Date.now();
     // Past grace window after start: mark fired, do not open
@@ -46,7 +53,13 @@ export function scheduleBrowserTimer(
       return;
     }
     firedEvents.set(event.id, endMs + FIRED_EVENT_TTL_MS);
-    if (showNativeNotification) {
+    const settings = runtime.dependencies.settings.get();
+    if (
+      options.nativeNotifications !== false &&
+      settings.nativeNotifications &&
+      (!settings.quietHoursEnabled ||
+        !isInQuietHours(new Date(now), settings.quietHoursStart, settings.quietHoursEnd))
+    ) {
       try {
         new Notification({
           title: event.title,

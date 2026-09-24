@@ -23,6 +23,7 @@ export interface TimersState {
   scheduledEventData: Map<EventId, ScheduledEventSnapshot>;
   firedEvents: Map<EventId, number>;
   alertFiredEvents: Map<EventId, number>;
+  alertOwners: Map<EventId, object>;
   /** Tracks events whose countdown has been cancelled to prevent clearHandle/cancel races */
   cancelledEvents: Set<EventId>;
 }
@@ -39,6 +40,7 @@ export function createTimersState(): TimersState {
     scheduledEventData: new Map<EventId, ScheduledEventSnapshot>(),
     firedEvents: new Map<EventId, number>(),
     alertFiredEvents: new Map<EventId, number>(),
+    alertOwners: new Map<EventId, object>(),
     cancelledEvents: new Set<EventId>(),
   };
 }
@@ -50,6 +52,7 @@ export function clearTimerHandles(s: TimersState): void {
 
   for (const handle of s.alertTimers.values()) clearTimeout(handle);
   s.alertTimers.clear();
+  s.alertOwners.clear();
 
   for (const handle of s.titleTimers.values()) clearTimeout(handle);
   s.titleTimers.clear();

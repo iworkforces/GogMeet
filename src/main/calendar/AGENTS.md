@@ -39,13 +39,15 @@ Google is live complete only when the calendar list and every selected calendar 
 ## Google
 
 - `extractMeetingUrl` walks `hangoutLink`, `conferenceData.entryPoints` URIs, `location`, raw `description`, then `cleanDescription`. The first allowlisted match wins. `validateMeetUrl` brands it.
-- Incremental sync runs when a stored token exists and the process-local index is non-empty. A cold process full-fetches. Incremental `events.list` sends `syncToken` only on the first page and does not send `timeMin`, `timeMax`, or `orderBy`.
-- HTTP 410 clears that calendar's token and index, then full-fetches. Disconnect clears tokens, sync tokens, the index, and the cache.
-- `pagination-limit` does not mutate that calendar's index or token. A finished sibling may still save its own token. Cache writes require aggregate `completeness === "complete"`.
-- Full-window malformed `items` becomes `pagination-limit` once any events were collected. Incremental malformed `items` returns `complete`, and those upserts and deletes are applied.
+- A compatible initial `events.list` is unbounded: `singleEvents=true`, `conferenceDataVersion=1`, `maxResults=250`, with no `timeMin`, `timeMax`, or `orderBy`. Its complete snapshot, including an empty one, stays process-local. Display projects timed overlaps and all-day calendar dates into the current two-local-calendar-day window.
+- Incremental sync requires a persisted token paired with that complete index, exact UTC window endpoints, local timezone, and account identity. Each delta page repeats the original `syncToken` and invariant parameters; only the terminal complete page can advance the token. Cold process, changed window or timezone, changed account, or HTTP 410 requires a new compatible unbounded seed.
+- After 50 unbounded pages, discard the incomplete batch and try a bounded `timeMin`/`timeMax`/`orderBy=startTime` full fetch. Only a complete bounded result may display/cache; it never establishes a resumable index or token. The next poll seeds again. Missing or non-array `items` on any events or calendar-list page is incomplete, not a valid empty page; `items: []` is valid.
+- HTTP 410 invalidates that calendar's pair and clears its token before reseeding. Disconnect synchronously invalidates outstanding provider work and the process index, aborts token refresh and in-flight PKCE login, then clears tokens, sync tokens, and cache. An OS write already in progress cannot be undone; the subsequent queued clear wins.
+- Completed delta pages remove indexed events that become cancelled, declined, or unmappable. Incomplete page chains never apply staged events, deletions, or cursor. A finished sibling may still save its own token. Only aggregate live `completeness === "complete"` writes the offline cache, guarded against cancelled/replaced polls.
 - Incremental 429 throws `RateLimitError` and does not full-fetch in that poll. Other incremental failures may full-fetch in the same poll.
 - First 401 forces one token refresh and one retry. A second 401 clears tokens. `if-needed` skips the network when expiry is more than 60s away. `force` joins the shared flight and runs one follow-up if that join did not refresh. The caller `AbortSignal` unblocks the waiter only.
 - Clear tokens for `invalid_grant`, `invalid_token`, or that second 401. Timeout, network, 429, 5xx, storage, and config keep ciphertext.
+- Refresh saves and definitive invalid-grant clears are queue-atomic and require the exact origin credential to remain current, so stale account A cannot overwrite or clear newly connected B. PKCE login timeout also invalidates that in-flight login.
 - `safeStorage` is required unless unpackaged `GOGMEET_ALLOW_PLAINTEXT_TOKENS=1`.
 - No push or webhook watch (ADR 0002).
 

@@ -81,6 +81,7 @@ function applyAction(
       break;
 
     case "start-in-meeting":
+      s.alertOwners.delete(action.eventId);
       s.scheduledEventData.set(action.eventId, {
         title: action.title,
         meetUrl: action.meetUrl,
@@ -99,7 +100,7 @@ function applyAction(
       break;
 
     case "cancel-alert":
-      cancelAlertTimer(action.eventId, s.alertTimers);
+      cancelAlertTimer(action.eventId, s);
       break;
 
     case "cancel-title":
@@ -125,14 +126,17 @@ function applyAction(
       break;
 
     case "delete-snapshot":
+      s.alertOwners.delete(action.eventId);
       s.scheduledEventData.delete(action.eventId);
       break;
 
     case "set-snapshot":
+      s.alertOwners.delete(action.eventId);
       s.scheduledEventData.set(action.eventId, action.snapshot);
       break;
 
     case "update-snapshot":
+      s.alertOwners.delete(action.eventId);
       s.scheduledEventData.set(action.eventId, action.snapshot);
       break;
 

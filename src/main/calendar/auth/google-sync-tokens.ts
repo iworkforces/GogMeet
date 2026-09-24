@@ -18,6 +18,21 @@ export interface GoogleSyncTokenFileV1 {
   readonly tokens: Record<string, string>;
 }
 
+const pendingByPath = new Map<string, Promise<void>>();
+
+function serialize<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const result = (pendingByPath.get(path) ?? Promise.resolve()).then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  pendingByPath.set(path, settled);
+  void settled.then(() => {
+    if (pendingByPath.get(path) === settled) pendingByPath.delete(path);
+  });
+  return result;
+}
+
 function authDir(): string {
   return join(app.getPath("userData"), "calendar-auth");
 }
@@ -50,9 +65,9 @@ function decode(buf: Buffer): string {
   throw new Error("OS secure storage unavailable for Google sync tokens");
 }
 
-export async function loadGoogleSyncTokens(): Promise<Record<string, string>> {
+async function readTokens(path: string): Promise<Record<string, string>> {
   try {
-    const buf = await readFile(syncPath());
+    const buf = await readFile(path);
     const parsed: unknown = JSON.parse(decode(buf));
     if (!isObjectRecord(parsed) || parsed["version"] !== GOOGLE_SYNC_SCHEMA_VERSION) {
       return {};
@@ -69,34 +84,67 @@ export async function loadGoogleSyncTokens(): Promise<Record<string, string>> {
   }
 }
 
-export async function saveGoogleSyncTokens(tokens: Record<string, string>): Promise<void> {
-  try {
-    await ensureSecureDir(authDir());
-    const payload: GoogleSyncTokenFileV1 = {
-      version: GOOGLE_SYNC_SCHEMA_VERSION,
-      tokens,
-    };
-    await writeSecureFile(syncPath(), encode(JSON.stringify(payload)));
-  } catch (err) {
-    console.warn("[calendar:google-sync] Failed to persist sync tokens (redacted)");
-    void err;
-  }
+export function loadGoogleSyncTokens(): Promise<Record<string, string>> {
+  const path = syncPath();
+  return serialize(path, () => readTokens(path));
+}
+
+async function writeTokens(
+  path: string,
+  tokens: Record<string, string>,
+  isCurrent?: () => boolean,
+): Promise<boolean> {
+  await ensureSecureDir(authDir());
+  if (isCurrent && !isCurrent()) return false;
+  const payload: GoogleSyncTokenFileV1 = {
+    version: GOOGLE_SYNC_SCHEMA_VERSION,
+    tokens,
+  };
+  await writeSecureFile(path, encode(JSON.stringify(payload)));
+  return true;
+}
+
+export function saveGoogleSyncTokens(tokens: Record<string, string>): Promise<void> {
+  const path = syncPath();
+  const snapshot = { ...tokens };
+  return serialize(path, async () => {
+    await writeTokens(path, snapshot);
+  });
+}
+
+export function updateGoogleSyncToken(
+  calendarId: string,
+  tokenOrNull: string | null,
+  isCurrent?: () => boolean,
+): Promise<boolean> {
+  const path = syncPath();
+  return serialize(path, async () => {
+    if (isCurrent && !isCurrent()) return false;
+    const tokens = await readTokens(path);
+    if (tokenOrNull === null) {
+      if (!(calendarId in tokens)) return true;
+      delete tokens[calendarId];
+    } else {
+      tokens[calendarId] = tokenOrNull;
+    }
+    return writeTokens(path, tokens, isCurrent);
+  });
 }
 
 export async function clearGoogleSyncToken(calendarId: string): Promise<void> {
-  const tokens = await loadGoogleSyncTokens();
-  if (!(calendarId in tokens)) return;
-  const next = { ...tokens };
-  delete next[calendarId];
-  await saveGoogleSyncTokens(next);
+  await updateGoogleSyncToken(calendarId, null);
 }
 
-export async function clearAllGoogleSyncTokens(): Promise<void> {
-  try {
-    await unlink(syncPath());
-  } catch {
-    // ignore missing
-  }
+export function clearAllGoogleSyncTokens(): Promise<void> {
+  const path = syncPath();
+  return serialize(path, async () => {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+  });
 }
 
 export function googleSyncTokenFilePath(): string {

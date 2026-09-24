@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { interpretSchedulePlan } from "../../src/main/scheduler/adapters/interpret-schedule.js";
 import { showAlert } from "../../src/main/windows/alert-window.js";
 import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
-import { createMockEvent } from "../helpers/test-utils.js";
+import { asTestIsoUtc, createMockEvent } from "../helpers/test-utils.js";
 
 vi.mock("../../src/main/windows/alert-window.js", () => ({ showAlert: vi.fn() }));
 
@@ -12,8 +12,11 @@ describe("interpretSchedulePlan", () => {
 
   it("alert dismissal cancels the browser timer in the interpreted runtime", async () => {
     const context = schedulerTestContext();
-    const event = createMockEvent();
     const now = Date.now();
+    const event = createMockEvent({
+      startDate: asTestIsoUtc(new Date(now + 6_000).toISOString()),
+      endDate: asTestIsoUtc(new Date(now + 60_000).toISOString()),
+    });
     interpretSchedulePlan(
       context.runtime,
       {

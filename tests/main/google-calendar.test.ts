@@ -5,6 +5,7 @@ import { createMockEvent, asTestMeetUrl, asTestIsoUtc } from "../helpers/test-ut
 const {
   ensureFreshGoogleAccessToken,
   refreshGoogleAccessToken,
+  abortGoogleTokenRefreshLifecycle,
   isGoogleOAuthInFlight,
   runGooglePkceLogin,
   loadGoogleTokens,
@@ -14,12 +15,13 @@ const {
   saveOfflineCache,
   clearOfflineCache,
   loadGoogleSyncTokens,
-  saveGoogleSyncTokens,
+  updateGoogleSyncToken,
   clearGoogleSyncToken,
   clearAllGoogleSyncTokens,
 } = vi.hoisted(() => ({
   ensureFreshGoogleAccessToken: vi.fn(),
   refreshGoogleAccessToken: vi.fn(),
+  abortGoogleTokenRefreshLifecycle: vi.fn(),
   isGoogleOAuthInFlight: vi.fn(),
   runGooglePkceLogin: vi.fn(),
   loadGoogleTokens: vi.fn(),
@@ -29,7 +31,7 @@ const {
   saveOfflineCache: vi.fn(),
   clearOfflineCache: vi.fn(),
   loadGoogleSyncTokens: vi.fn(),
-  saveGoogleSyncTokens: vi.fn(),
+  updateGoogleSyncToken: vi.fn(),
   clearGoogleSyncToken: vi.fn(),
   clearAllGoogleSyncTokens: vi.fn(),
 }));
@@ -37,6 +39,7 @@ const {
 vi.mock("../../src/main/calendar/auth/google-oauth.js", () => ({
   ensureFreshGoogleAccessToken,
   refreshGoogleAccessToken,
+  abortGoogleTokenRefreshLifecycle,
   isGoogleOAuthInFlight,
   runGooglePkceLogin,
 }));
@@ -55,7 +58,7 @@ vi.mock("../../src/main/calendar/offline-cache.js", () => ({
 }));
 vi.mock("../../src/main/calendar/auth/google-sync-tokens.js", () => ({
   loadGoogleSyncTokens,
-  saveGoogleSyncTokens,
+  updateGoogleSyncToken,
   clearGoogleSyncToken,
   clearAllGoogleSyncTokens,
 }));
@@ -82,6 +85,8 @@ describe("createGoogleCalendarProvider", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-27T12:00:00.000Z"));
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     ensureFreshGoogleAccessToken.mockReset();
@@ -95,13 +100,15 @@ describe("createGoogleCalendarProvider", () => {
     saveOfflineCache.mockReset().mockResolvedValue(undefined);
     clearOfflineCache.mockReset().mockResolvedValue(undefined);
     loadGoogleSyncTokens.mockReset().mockResolvedValue({});
-    saveGoogleSyncTokens.mockReset().mockResolvedValue(undefined);
+    updateGoogleSyncToken.mockReset().mockResolvedValue(true);
+    abortGoogleTokenRefreshLifecycle.mockReset();
     clearGoogleSyncToken.mockReset().mockResolvedValue(undefined);
     clearAllGoogleSyncTokens.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("returns permission-denied when no tokens", async () => {
@@ -180,6 +187,107 @@ describe("createGoogleCalendarProvider", () => {
     expect(saveOfflineCache).toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: "invalid timed start",
+      start: { dateTime: "not-a-date" },
+      end: { dateTime: "2026-03-02T16:30:00.000Z" },
+    },
+    {
+      name: "invalid timed end",
+      start: { dateTime: "2026-03-02T16:00:00.000Z" },
+      end: { dateTime: "not-a-date" },
+    },
+    {
+      name: "rolled-over timed start",
+      start: { dateTime: "2026-02-30T15:00:00.000Z" },
+      end: { dateTime: "2026-03-02T15:30:00.000Z" },
+    },
+    { name: "invalid all-day start", start: { date: "not-a-date" }, end: { date: "2026-03-03" } },
+    { name: "invalid all-day end", start: { date: "2026-03-02" }, end: { date: "not-a-date" } },
+    {
+      name: "rolled-over all-day start",
+      start: { date: "2026-02-30" },
+      end: { date: "2026-03-03" },
+    },
+    { name: "rolled-over all-day end", start: { date: "2026-03-02" }, end: { date: "2026-02-31" } },
+  ])("keeps the valid sibling and full cursor after a $name", async ({ start, end }) => {
+    vi.setSystemTime(new Date("2026-03-02T12:00:00.000Z"));
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    fetchMock.mockImplementation(async (url: string) =>
+      url.includes("calendarList")
+        ? jsonResponse({ items: [{ id: "primary", primary: true }] })
+        : jsonResponse({
+            items: [
+              { id: "broken", summary: "Broken", start, end },
+              {
+                id: "valid",
+                summary: "Valid",
+                start: { dateTime: "2026-03-02T15:00:00.000Z" },
+                end: { dateTime: "2026-03-02T15:30:00.000Z" },
+              },
+            ],
+            nextSyncToken: "full-after-broken",
+          }),
+    );
+
+    const result = await createGoogleCalendarProvider().getEvents(new AbortController().signal);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok" || result.source !== "live") return;
+    expect(result.completeness).toBe("complete");
+    expect(result.events.map((event) => event.id)).toEqual(["primary:valid"]);
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith(
+      "primary",
+      "full-after-broken",
+      expect.any(Function),
+    );
+  });
+
+  it("projects date-only meetings by their local calendar dates across DST", async () => {
+    const previousTimezone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    vi.setSystemTime(new Date("2026-03-08T12:00:00.000Z"));
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    fetchMock.mockImplementation(async (url: string) =>
+      url.includes("calendarList")
+        ? jsonResponse({ items: [{ id: "primary", primary: true }] })
+        : jsonResponse({
+            items: [
+              {
+                id: "today",
+                summary: "Today",
+                start: { date: "2026-03-08" },
+                end: { date: "2026-03-09" },
+              },
+              {
+                id: "tomorrow",
+                summary: "Tomorrow",
+                start: { date: "2026-03-09" },
+                end: { date: "2026-03-10" },
+              },
+              {
+                id: "later",
+                summary: "Later",
+                start: { date: "2026-03-10" },
+                end: { date: "2026-03-11" },
+              },
+            ],
+          }),
+    );
+
+    try {
+      const result = await createGoogleCalendarProvider().getEvents(new AbortController().signal);
+      expect(result.kind === "ok" ? result.events.map((event) => event.title) : []).toEqual([
+        "Today",
+        "Tomorrow",
+      ]);
+    } finally {
+      if (previousTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimezone;
+    }
+  });
+
   it("falls back to offline cache on network error", async () => {
     ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
     fetchMock.mockRejectedValue(new Error("network down"));
@@ -254,7 +362,7 @@ describe("createGoogleCalendarProvider", () => {
     if (result.kind === "ok") {
       expect(result.events[0]?.title).toBe("After retry");
     }
-    expect(refreshGoogleAccessToken).toHaveBeenCalledWith("force");
+    expect(refreshGoogleAccessToken).toHaveBeenCalledWith("force", expect.any(AbortSignal));
     expect(tokensSeen.some((h) => h.includes("new-access"))).toBe(true);
   });
 
@@ -273,7 +381,7 @@ describe("createGoogleCalendarProvider", () => {
     if (result.kind === "err") {
       expect(result.code).toBe("permission-denied");
     }
-    expect(refreshGoogleAccessToken).toHaveBeenCalledWith("force");
+    expect(refreshGoogleAccessToken).toHaveBeenCalledWith("force", expect.any(AbortSignal));
     expect(clearGoogleTokens).toHaveBeenCalled();
   });
 
@@ -292,8 +400,48 @@ describe("createGoogleCalendarProvider", () => {
     const provider = createGoogleCalendarProvider();
     const result = await provider.getEvents(new AbortController().signal);
     expect(result.kind).toBe("ok");
-    if (result.kind === "ok") expect(result.events).toEqual([]);
+    if (result.kind === "ok") {
+      expect(result.events).toEqual([]);
+      expect(result.completeness).toBe("complete");
+    }
     warn.mockRestore();
+  });
+
+  it.each([
+    { name: "first page missing items", later: false, body: {} },
+    { name: "first page with non-array items", later: false, body: { items: {} } },
+    { name: "later page missing items", later: true, body: {} },
+    { name: "later page with non-array items", later: true, body: { items: {} } },
+  ])("treats malformed calendarList $name as partial without caching", async ({ later, body }) => {
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("calendarList")) {
+        if (later && !url.includes("pageToken=")) {
+          return jsonResponse({ items: [{ id: "primary", primary: true }], nextPageToken: "p2" });
+        }
+        return jsonResponse(body);
+      }
+      return jsonResponse({
+        items: [
+          {
+            id: "meeting",
+            summary: "Joinable",
+            hangoutLink: "https://meet.google.com/aaa-bbbb-ccc",
+            start: { dateTime: "2026-07-27T15:00:00.000Z" },
+            end: { dateTime: "2026-07-27T15:30:00.000Z" },
+          },
+        ],
+        nextSyncToken: "seed-token",
+      });
+    });
+
+    const result = await createGoogleCalendarProvider().getEvents(new AbortController().signal);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.completeness).toBe("partial");
+    expect(result.events.map((event) => event.title)).toEqual(["Joinable"]);
+    expect(saveOfflineCache).not.toHaveBeenCalled();
   });
 
   it("permission helpers and disconnect", async () => {
@@ -329,6 +477,7 @@ describe("createGoogleCalendarProvider", () => {
     expect(clearGoogleTokens).toHaveBeenCalled();
     expect(clearOfflineCache).toHaveBeenCalled();
     expect(clearAllGoogleSyncTokens).toHaveBeenCalled();
+    expect(abortGoogleTokenRefreshLifecycle).toHaveBeenCalled();
 
     ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
     await provider.warmup?.();
@@ -510,8 +659,10 @@ describe("createGoogleCalendarProvider", () => {
     const provider = createGoogleCalendarProvider();
     const result = await provider.getEvents(new AbortController().signal);
     expect(result.kind).toBe("ok");
-    expect(saveGoogleSyncTokens).toHaveBeenCalledWith(
-      expect.objectContaining({ primary: "sync-token-1" }),
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith(
+      "primary",
+      "sync-token-1",
+      expect.any(Function),
     );
   });
 
@@ -526,8 +677,10 @@ describe("createGoogleCalendarProvider", () => {
     // In-memory token map for this provider instance sequence
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
     clearGoogleSyncToken.mockImplementation(async (id: string) => {
       const next = { ...stored };
@@ -616,8 +769,125 @@ describe("createGoogleCalendarProvider", () => {
       // index cleared on 410 — original/added not retained unless returned
       expect(r3.events.some((e) => e.title === "Added")).toBe(false);
     }
-    expect(clearGoogleSyncToken).toHaveBeenCalledWith("primary");
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith("primary", null, expect.any(Function));
     expect(stored["primary"]).toBe("tok-c");
+  });
+
+  it("removes declined and unmappable delta updates after a completed cursor", async () => {
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    let stored: Record<string, string> = {};
+    loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
+    updateGoogleSyncToken.mockImplementation(async (calendarId: string, token: string | null) => {
+      if (token === null) delete stored[calendarId];
+      else stored[calendarId] = token;
+      return true;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("calendarList")) {
+        return jsonResponse({ items: [{ id: "primary", primary: true }] });
+      }
+      if (url.includes("syncToken=seed-token")) {
+        return jsonResponse({
+          items: [
+            { id: "declined", attendees: [{ self: true, responseStatus: "declined" }] },
+            { id: "unmappable", summary: "No dates" },
+          ],
+          nextSyncToken: "next-token",
+        });
+      }
+      return jsonResponse({
+        items: ["declined", "unmappable", "sibling"].map((id) => ({
+          id,
+          summary: id,
+          hangoutLink: "https://meet.google.com/aaa-bbbb-ccc",
+          start: { dateTime: "2026-07-27T15:00:00.000Z" },
+          end: { dateTime: "2026-07-27T15:30:00.000Z" },
+        })),
+        nextSyncToken: "seed-token",
+      });
+    });
+    const provider = createGoogleCalendarProvider();
+    const initial = await provider.getEvents(new AbortController().signal);
+    expect(initial.kind === "ok" ? initial.events.map((event) => event.title) : []).toEqual([
+      "declined",
+      "unmappable",
+      "sibling",
+    ]);
+
+    const result = await provider.getEvents(new AbortController().signal);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.events.map((event) => event.title)).toEqual(["sibling"]);
+    expect(result.completeness).toBe("complete");
+    expect(stored["primary"]).toBe("next-token");
+  });
+
+  it.each([
+    {
+      name: "invalid timed update",
+      start: { dateTime: "not-a-date" },
+      end: { dateTime: "2026-03-02T15:30:00.000Z" },
+    },
+    {
+      name: "rolled-over all-day update",
+      start: { date: "2026-02-30" },
+      end: { date: "2026-03-03" },
+    },
+  ])("deletes a $name without losing its incremental sibling or cursor", async ({ start, end }) => {
+    vi.setSystemTime(new Date("2026-03-02T12:00:00.000Z"));
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    let stored: Record<string, string> = {};
+    loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
+    updateGoogleSyncToken.mockImplementation(async (calendarId: string, token: string | null) => {
+      if (token === null) delete stored[calendarId];
+      else stored[calendarId] = token;
+      return true;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("calendarList")) {
+        return jsonResponse({ items: [{ id: "primary", primary: true }] });
+      }
+      if (url.includes("syncToken=seed-token")) {
+        return jsonResponse({
+          items: [
+            { id: "replace", summary: "Broken update", start, end },
+            {
+              id: "added",
+              summary: "Added sibling",
+              start: { dateTime: "2026-03-02T16:00:00.000Z" },
+              end: { dateTime: "2026-03-02T16:30:00.000Z" },
+            },
+          ],
+          nextSyncToken: "next-token",
+        });
+      }
+      return jsonResponse({
+        items: ["replace", "keep"].map((id) => ({
+          id,
+          summary: id,
+          start: { dateTime: "2026-03-02T15:00:00.000Z" },
+          end: { dateTime: "2026-03-02T15:30:00.000Z" },
+        })),
+        nextSyncToken: "seed-token",
+      });
+    });
+
+    const provider = createGoogleCalendarProvider();
+    const seed = await provider.getEvents(new AbortController().signal);
+    expect(seed.kind === "ok" ? seed.events.map((event) => event.title) : []).toEqual([
+      "replace",
+      "keep",
+    ]);
+    expect(stored["primary"]).toBe("seed-token");
+
+    const result = await provider.getEvents(new AbortController().signal);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok" || result.source !== "live") return;
+    expect(result.completeness).toBe("complete");
+    expect(result.events.map((event) => event.title)).toEqual(["keep", "Added sibling"]);
+    expect(stored["primary"]).toBe("next-token");
   });
 
   it("incremental sync applies cancelled deletions and falls back on non-410 transport errors", async () => {
@@ -628,8 +898,10 @@ describe("createGoogleCalendarProvider", () => {
 
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
 
     let phase: "full" | "inc-cancel" | "inc-fail" | "full-fallback" = "full";
@@ -773,15 +1045,17 @@ describe("createGoogleCalendarProvider", () => {
     }
   });
 
-  it("incremental pageToken continues without repeating syncToken param", async () => {
+  it("incremental pageToken repeats the original syncToken param", async () => {
     ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
     const start = new Date();
     start.setHours(13, 0, 0, 0);
     const end = new Date(start.getTime() + 30 * 60_000);
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
     clearAllGoogleSyncTokens.mockImplementation(async () => {
       stored = {};
@@ -823,9 +1097,8 @@ describe("createGoogleCalendarProvider", () => {
             nextPageToken: "page-2",
           });
         }
-        // second incremental page — should have pageToken, not syncToken
         expect(url).toContain("pageToken=");
-        expect(url).not.toContain("syncToken=");
+        expect(new URL(url).searchParams.get("syncToken")).toBe("sync-start");
         return jsonResponse({
           items: [
             {
@@ -864,8 +1137,10 @@ describe("createGoogleCalendarProvider", () => {
     const end = new Date(start.getTime() + 30 * 60_000);
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
     let phase: "full" | "inc" = "full";
     fetchMock.mockImplementation(async (url: string) => {
@@ -905,8 +1180,10 @@ describe("createGoogleCalendarProvider", () => {
     const end = new Date(start.getTime() + 30 * 60_000);
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
 
     const offlineEvents = [
@@ -968,7 +1245,7 @@ describe("createGoogleCalendarProvider", () => {
     const requestsAfterSeed = eventRequestCount;
     const tokenSnapshot = { ...stored };
     saveOfflineCache.mockClear();
-    saveGoogleSyncTokens.mockClear();
+    updateGoogleSyncToken.mockClear();
     refreshGoogleAccessToken.mockClear();
 
     const r2 = await provider.getEvents(new AbortController().signal);
@@ -977,7 +1254,7 @@ describe("createGoogleCalendarProvider", () => {
     expect(refreshGoogleAccessToken).not.toHaveBeenCalled();
     expect(clearGoogleTokens).not.toHaveBeenCalled();
     expect(stored).toEqual(tokenSnapshot);
-    expect(saveGoogleSyncTokens).not.toHaveBeenCalled();
+    expect(updateGoogleSyncToken).not.toHaveBeenCalled();
     expect(saveOfflineCache).not.toHaveBeenCalled();
     // Zero complete calendars → offline display path.
     expect(r2.kind).toBe("ok");
@@ -1002,7 +1279,11 @@ describe("createGoogleCalendarProvider", () => {
           ],
         });
       }
-      if (url.includes("/calendars/a/") || url.includes("/calendars/a%2F") || url.includes("calendars/a/")) {
+      if (
+        url.includes("/calendars/a/") ||
+        url.includes("/calendars/a%2F") ||
+        url.includes("calendars/a/")
+      ) {
         return jsonResponse({
           items: [
             {
@@ -1038,10 +1319,10 @@ describe("createGoogleCalendarProvider", () => {
     clearGoogleTokens.mockClear();
     clearOfflineCache.mockClear();
     saveOfflineCache.mockClear();
-    saveGoogleSyncTokens.mockClear();
+    updateGoogleSyncToken.mockClear();
 
     const result = await provider.getEvents(new AbortController().signal);
-    expect(fullPagesB).toBe(50);
+    expect(fullPagesB).toBe(100);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
       expect(result.source).toBe("live");
@@ -1051,7 +1332,7 @@ describe("createGoogleCalendarProvider", () => {
       expect(isCalendarAutomationEligible(result)).toBe(false);
     }
     expect(saveOfflineCache).not.toHaveBeenCalled();
-    expect(saveGoogleSyncTokens).toHaveBeenCalledWith(expect.objectContaining({ a: "tok-a" }));
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith("a", "tok-a", expect.any(Function));
   });
 
   it("calendarList pagination exhaustion yields live partial and skips aggregate cache write", async () => {
@@ -1090,7 +1371,7 @@ describe("createGoogleCalendarProvider", () => {
     clearGoogleTokens.mockClear();
     clearOfflineCache.mockClear();
     saveOfflineCache.mockClear();
-    saveGoogleSyncTokens.mockClear();
+    updateGoogleSyncToken.mockClear();
 
     const result = await provider.getEvents(new AbortController().signal);
     expect(listPages).toBe(50);
@@ -1104,23 +1385,119 @@ describe("createGoogleCalendarProvider", () => {
     // Incomplete calendar-list must not authorize aggregate offline cache.
     expect(saveOfflineCache).not.toHaveBeenCalled();
     // Complete known calendars may still commit their own sync token.
-    expect(saveGoogleSyncTokens).toHaveBeenCalledWith(
-      expect.objectContaining({ c1: "sync-c1" }),
-    );
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith("c1", "sync-c1", expect.any(Function));
   });
 
-  it("full-event pagination exhaustion discards partial batch and preserves prior index/token", async () => {
+  it("uses a complete bounded fetch after 50 unbounded pages without adopting its cursor", async () => {
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    const start = new Date();
+    start.setHours(15, 0, 0, 0);
+    const end = new Date(start.getTime() + 30 * 60_000);
+    let unboundedPages = 0;
+    let boundedPages = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("calendarList")) {
+        return jsonResponse({ items: [{ id: "primary", primary: true }] });
+      }
+      const params = new URL(url).searchParams;
+      expect(params.has("syncToken")).toBe(false);
+      if (params.has("timeMin")) {
+        boundedPages++;
+        expect(params.has("timeMax")).toBe(true);
+        expect(params.get("orderBy")).toBe("startTime");
+        return jsonResponse({
+          items: [
+            {
+              id: "bounded",
+              summary: "Bounded",
+              start: { dateTime: start.toISOString() },
+              end: { dateTime: end.toISOString() },
+            },
+          ],
+          nextSyncToken: "bounded-token-must-not-persist",
+        });
+      }
+      expect(params.has("orderBy")).toBe(false);
+      unboundedPages++;
+      return jsonResponse({ items: [], nextPageToken: `page-${unboundedPages + 1}` });
+    });
+
+    const provider = createGoogleCalendarProvider();
+    const first = await provider.getEvents(new AbortController().signal);
+    const second = await provider.getEvents(new AbortController().signal);
+
+    for (const result of [first, second]) {
+      expect(result.kind).toBe("ok");
+      if (result.kind === "ok") {
+        expect(result.source).toBe("live");
+        expect(result.events.map((event) => event.title)).toEqual(["Bounded"]);
+      }
+    }
+    expect(unboundedPages).toBe(100);
+    expect(boundedPages).toBe(2);
+    expect(updateGoogleSyncToken).toHaveBeenCalledTimes(2);
+    expect(updateGoogleSyncToken).toHaveBeenCalledWith("primary", null, expect.any(Function));
+    expect(saveOfflineCache).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards an old cursor after a complete unbounded full with no terminal token", async () => {
+    ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
+    let fullCalls = 0;
+    let stored: Record<string, string> = {};
+    loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("calendarList")) {
+        return jsonResponse({ items: [{ id: "primary", primary: true }] });
+      }
+      expect(new URL(url).searchParams.has("syncToken")).toBe(false);
+      fullCalls++;
+      return jsonResponse({
+        items: [],
+        ...(fullCalls === 2 ? {} : { nextSyncToken: fullCalls === 1 ? "old" : "new" }),
+      });
+    });
+
+    const provider = createGoogleCalendarProvider();
+    const seed = await provider.getEvents(new AbortController().signal);
+    expect(seed.kind).toBe("ok");
+    expect(stored["primary"]).toBe("old");
+    vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
+    const noToken = await provider.getEvents(new AbortController().signal);
+    const reseed = await provider.getEvents(new AbortController().signal);
+
+    expect(noToken.kind).toBe("ok");
+    expect(reseed.kind).toBe("ok");
+    expect(fullCalls).toBe(3);
+    expect(updateGoogleSyncToken).toHaveBeenNthCalledWith(2, "primary", null, expect.any(Function));
+    expect(updateGoogleSyncToken).toHaveBeenNthCalledWith(
+      3,
+      "primary",
+      "new",
+      expect.any(Function),
+    );
+    expect(stored["primary"]).toBe("new");
+    expect(saveOfflineCache).toHaveBeenCalledTimes(3);
+  });
+
+  it("full-event pagination exhaustion discards both incomplete batches and reseeds", async () => {
     ensureFreshGoogleAccessToken.mockResolvedValue(tokens);
     const start = new Date();
     start.setHours(14, 0, 0, 0);
     const end = new Date(start.getTime() + 30 * 60_000);
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
 
-    let phase: "seed" | "exhaust-full" | "inc-verify" = "seed";
+    let phase: "seed" | "exhaust-full" | "reseed" = "seed";
     let fullExhaustPages = 0;
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes("calendarList")) {
@@ -1142,7 +1519,6 @@ describe("createGoogleCalendarProvider", () => {
           });
         }
         if (phase === "exhaust-full") {
-          // Force full window: no syncToken on request after we clear stored tokens.
           expect(url).not.toContain("syncToken=");
           fullExhaustPages++;
           return jsonResponse({
@@ -1159,11 +1535,17 @@ describe("createGoogleCalendarProvider", () => {
             nextSyncToken: "tok-should-not-commit",
           });
         }
-        // After exhaustion, restore token and prove prior index still merges.
-        expect(url).toContain("syncToken=");
+        expect(url).not.toContain("syncToken=");
         return jsonResponse({
-          items: [],
-          nextSyncToken: "tok-seed",
+          items: [
+            {
+              id: "seeded",
+              summary: "Reseeded",
+              start: { dateTime: start.toISOString() },
+              end: { dateTime: end.toISOString() },
+            },
+          ],
+          nextSyncToken: "tok-reseed",
         });
       }
       return jsonResponse({}, 404);
@@ -1186,26 +1568,25 @@ describe("createGoogleCalendarProvider", () => {
     // Clear sync token so next poll takes full-window path while process index remains.
     stored = {};
     saveOfflineCache.mockClear();
-    saveGoogleSyncTokens.mockClear();
+    updateGoogleSyncToken.mockClear();
 
     const r2 = await provider.getEvents(new AbortController().signal);
-    expect(fullExhaustPages).toBe(50);
+    expect(fullExhaustPages).toBe(100);
     // Single calendar incomplete → no complete success → error/offline path (no offline here).
     expect(r2.kind).toBe("err");
     // Prior token not replaced with incomplete-chain token; still empty after our clear.
     expect(stored["primary"]).toBeUndefined();
-    expect(saveGoogleSyncTokens).not.toHaveBeenCalled();
+    expect(updateGoogleSyncToken).not.toHaveBeenCalled();
     expect(saveOfflineCache).not.toHaveBeenCalled();
 
-    // Restore prior token; incremental against preserved index still sees Seeded (not Partial*).
-    stored = { primary: "tok-seed" };
-    phase = "inc-verify";
+    phase = "reseed";
     const r3 = await provider.getEvents(new AbortController().signal);
     expect(r3.kind).toBe("ok");
     if (r3.kind === "ok") {
-      expect(r3.events.some((e) => e.title === "Seeded")).toBe(true);
+      expect(r3.events.some((e) => e.title === "Reseeded")).toBe(true);
       expect(r3.events.some((e) => e.title.startsWith("Partial"))).toBe(false);
     }
+    expect(stored["primary"]).toBe("tok-reseed");
   });
 
   it("incremental pagination exhaustion applies no upserts and preserves token/index", async () => {
@@ -1215,8 +1596,10 @@ describe("createGoogleCalendarProvider", () => {
     const end = new Date(start.getTime() + 30 * 60_000);
     let stored: Record<string, string> = {};
     loadGoogleSyncTokens.mockImplementation(async () => ({ ...stored }));
-    saveGoogleSyncTokens.mockImplementation(async (t: Record<string, string>) => {
-      stored = { ...t };
+    updateGoogleSyncToken.mockImplementation(async (id: string, token: string | null) => {
+      if (token === null) delete stored[id];
+      else stored[id] = token;
+      return true;
     });
 
     let phase: "seed" | "inc-exhaust" = "seed";
@@ -1241,7 +1624,7 @@ describe("createGoogleCalendarProvider", () => {
           });
         }
         incPages++;
-        // First incremental page may carry syncToken; later pages use pageToken only.
+        expect(new URL(url).searchParams.get("syncToken")).toBe("tok-keep");
         return jsonResponse({
           items: [
             {
@@ -1273,7 +1656,7 @@ describe("createGoogleCalendarProvider", () => {
     expect(stored["primary"]).toBe("tok-keep");
 
     saveOfflineCache.mockClear();
-    saveGoogleSyncTokens.mockClear();
+    updateGoogleSyncToken.mockClear();
     const tokenSnapshot = { ...stored };
 
     const r2 = await provider.getEvents(new AbortController().signal);
@@ -1281,7 +1664,7 @@ describe("createGoogleCalendarProvider", () => {
     // Incomplete incremental calendar → not live complete; no offline fixture → error.
     expect(r2.kind).toBe("err");
     expect(stored).toEqual(tokenSnapshot);
-    expect(saveGoogleSyncTokens).not.toHaveBeenCalled();
+    expect(updateGoogleSyncToken).not.toHaveBeenCalled();
     expect(saveOfflineCache).not.toHaveBeenCalled();
     if (r2.kind === "err") {
       expect(isCalendarAutomationEligible(r2)).toBe(false);
@@ -1308,4 +1691,3 @@ describe("createGoogleCalendarProvider", () => {
     }
   });
 });
-

@@ -1,7 +1,6 @@
 import type { MeetingEvent } from "../../../domain/entities/meeting-event.js";
 import type { EventId } from "../../../domain/entities/brand.js";
 import type { AppSettings } from "../../../domain/entities/settings.js";
-import { isInQuietHours } from "../../../domain/entities/settings.js";
 import { isLateJoinEligible } from "../late-join.js";
 import type {
   PlanScheduleOptions,
@@ -122,9 +121,6 @@ function planInProgressEvent(
   // Match post-cancel timer map: only arm if no preserved pending browser timer.
   const stillPendingBrowser = preserveBrowserTimer && snapshot.pendingBrowserIds.has(event.id);
   if (lateJoin && !stillPendingBrowser) {
-    const quiet =
-      settings.quietHoursEnabled &&
-      isInQuietHours(new Date(nowMs), settings.quietHoursStart, settings.quietHoursEnd);
     actions.push({
       type: "arm-browser",
       event,
@@ -132,7 +128,7 @@ function planInProgressEvent(
       openAtMs: startMs,
       startMs,
       endMs,
-      notify: settings.nativeNotifications && !quiet,
+      notify: settings.nativeNotifications,
       graceMs,
     });
   }
@@ -263,9 +259,6 @@ function planFutureTimers(
   actions: ScheduleAction[],
 ): void {
   const effectiveDelay = Math.max(0, delayMs);
-  const quiet =
-    settings.quietHoursEnabled &&
-    isInQuietHours(new Date(nowMs), settings.quietHoursStart, settings.quietHoursEnd);
 
   // Snapshot is independent of browser open so title countdown, skip/idempotence,
   // and alert paths work when autoOpenEnabled is false.
@@ -278,7 +271,7 @@ function planFutureTimers(
   };
   actions.push({ type: "set-snapshot", eventId: event.id, snapshot: eventSnapshot });
 
-  if (settings.windowAlert && !quiet && !snapshot.alertFiredEvents.has(event.id)) {
+  if (settings.windowAlert && !snapshot.alertFiredEvents.has(event.id)) {
     actions.push({
       type: "arm-alert",
       event,
@@ -297,7 +290,7 @@ function planFutureTimers(
       openAtMs,
       startMs,
       endMs,
-      notify: settings.nativeNotifications && !quiet,
+      notify: settings.nativeNotifications,
       graceMs: settings.lateJoinGraceMinutes * 60_000,
     });
   }

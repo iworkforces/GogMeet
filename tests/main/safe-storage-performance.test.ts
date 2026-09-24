@@ -119,12 +119,7 @@ describe("safeStorage temporary unavailability", () => {
       "../../src/main/calendar/offline-cache.js"
     );
     const now = Date.now();
-    await saveOfflineCache({
-      version: 1,
-      observedAt: now,
-      cachedAt: now,
-      events: [],
-    });
+    await saveOfflineCache([], now);
     const path = offlineCacheFilePath();
     await access(path, fsConstants.F_OK);
 

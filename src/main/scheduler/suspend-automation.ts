@@ -19,6 +19,7 @@ export function suspendAutomation(runtime: SchedulerRuntime): void {
 
   for (const handle of state.alertTimers.values()) clearTimeout(handle);
   state.alertTimers.clear();
+  state.alertOwners.clear();
 
   for (const handle of state.titleTimers.values()) clearTimeout(handle);
   state.titleTimers.clear();

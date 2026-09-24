@@ -23,11 +23,11 @@ import type { CalendarProvider } from "../provider.js";
 import { clearGoogleTokens, loadGoogleTokens } from "../auth/google-token-store.js";
 import {
   clearAllGoogleSyncTokens,
-  clearGoogleSyncToken,
   loadGoogleSyncTokens,
-  saveGoogleSyncTokens,
+  updateGoogleSyncToken,
 } from "../auth/google-sync-tokens.js";
 import {
+  abortGoogleTokenRefreshLifecycle,
   ensureFreshGoogleAccessToken,
   isGoogleOAuthInFlight,
   refreshGoogleAccessToken,
@@ -44,8 +44,19 @@ import {
 
 const MAX_PAGES = 50;
 
-/** Process-local event index for incremental merge (not a durable event DB). */
-const workingEventsByCalendar = new Map<string, Map<string, MeetingEvent>>();
+type SyncPair = {
+  readonly token: string;
+  readonly events: Map<string, MeetingEvent>;
+  readonly timeMin: string;
+  readonly timeMax: string;
+  readonly timezone: string;
+  readonly account: string;
+};
+
+const workingPairs = new Map<string, SyncPair>();
+let lifecycleGeneration = 0;
+let pollRevision = 0;
+let disconnectBarrier: Promise<void> = Promise.resolve();
 
 /** Internal page-chain outcome: complete vs hit MAX_PAGES with more pages remaining. */
 type TraversalStatus = "complete" | "pagination-limit";
@@ -72,6 +83,13 @@ class PaginationLimitError extends Error {
   }
 }
 
+class TokenPersistenceError extends Error {
+  constructor() {
+    super("Google sync token persistence failed");
+    this.name = "TokenPersistenceError";
+  }
+}
+
 /** HTTP 429 — distinct from generic NetworkError so incremental paths skip full-window retry. */
 class RateLimitError extends Error {
   constructor(message: string = "Google API rate limited (429)") {
@@ -80,12 +98,42 @@ class RateLimitError extends Error {
   }
 }
 
-function dayBoundsLocal(): { timeMin: string; timeMax: string } {
+function dayBoundsLocal(): { timeMin: string; timeMax: string; timezone: string } {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
   const end = new Date(start);
   end.setDate(end.getDate() + 2);
-  return { timeMin: start.toISOString(), timeMax: end.toISOString() };
+  return {
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+}
+
+type PollContext = {
+  readonly signal: AbortSignal;
+  readonly isCurrent: () => boolean;
+  readonly account: string;
+  readonly window: ReturnType<typeof dayBoundsLocal>;
+};
+
+function requireCurrent(context: PollContext): void {
+  if (!context.isCurrent()) throw new NetworkError("Google calendar poll cancelled");
+}
+
+async function persistToken(
+  calendarId: string,
+  token: string | null,
+  context: PollContext,
+): Promise<void> {
+  try {
+    const saved = await updateGoogleSyncToken(calendarId, token, context.isCurrent);
+    requireCurrent(context);
+    if (!saved) throw new TokenPersistenceError();
+  } catch {
+    requireCurrent(context);
+    throw new TokenPersistenceError();
+  }
 }
 
 async function googleFetch(
@@ -142,9 +190,7 @@ async function listSelectedCalendarIds(
       throw new NetworkError(`calendarList failed (${result.status})`);
     }
     if (!isObjectRecord(result.json) || !Array.isArray(result.json["items"])) {
-      // First empty/malformed page → empty complete (primary default below).
-      // Malformed after we already have IDs or pages → incomplete, never live complete.
-      status = ids.length > 0 || page > 0 ? "pagination-limit" : "complete";
+      status = "pagination-limit";
       break;
     }
 
@@ -175,6 +221,20 @@ async function listSelectedCalendarIds(
   return { status, calendarIds: [...new Set(ids)] };
 }
 
+function parseGoogleEventDate(value: string, allDay: boolean): string | null {
+  const calendarDate = allDay ? value : value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(calendarDate)) return null;
+  const midnight = new Date(`${calendarDate}T00:00:00.000Z`);
+  if (
+    !Number.isFinite(midnight.getTime()) ||
+    midnight.toISOString().slice(0, 10) !== calendarDate
+  ) {
+    return null;
+  }
+  const date = allDay ? midnight : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 function mapGoogleEvent(
   raw: unknown,
   calendarId: string,
@@ -202,19 +262,20 @@ function mapGoogleEvent(
   if (!startObj || !endObj) return null;
 
   let isAllDay = false;
-  let startIso: string;
-  let endIso: string;
+  let startIso: string | null;
+  let endIso: string | null;
 
   if (typeof startObj["dateTime"] === "string" && typeof endObj["dateTime"] === "string") {
-    startIso = new Date(startObj["dateTime"]).toISOString();
-    endIso = new Date(endObj["dateTime"]).toISOString();
+    startIso = parseGoogleEventDate(startObj["dateTime"], false);
+    endIso = parseGoogleEventDate(endObj["dateTime"], false);
   } else if (typeof startObj["date"] === "string" && typeof endObj["date"] === "string") {
     isAllDay = true;
-    startIso = new Date(`${startObj["date"]}T00:00:00.000Z`).toISOString();
-    endIso = new Date(`${endObj["date"]}T00:00:00.000Z`).toISOString();
+    startIso = parseGoogleEventDate(startObj["date"], true);
+    endIso = parseGoogleEventDate(endObj["date"], true);
   } else {
     return null;
   }
+  if (startIso === null || endIso === null) return null;
 
   const startBrand = asIsoUtc(startIso);
   const endBrand = asIsoUtc(endIso);
@@ -275,12 +336,12 @@ async function fetchEventsFullWindow(
   calendarId: string,
   calendarName: string,
   userEmail: string | undefined,
-  timeMin: string,
-  timeMax: string,
+  window: ReturnType<typeof dayBoundsLocal> | undefined,
   signal?: AbortSignal,
 ): Promise<
   | { status: "complete"; events: MeetingEvent[]; nextSyncToken: string | undefined }
   | { status: "pagination-limit" }
+  | { status: "malformed" }
 > {
   const events: MeetingEvent[] = [];
   let pageToken: string | undefined;
@@ -291,9 +352,11 @@ async function fetchEventsFullWindow(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
     );
     url.searchParams.set("singleEvents", "true");
-    url.searchParams.set("orderBy", "startTime");
-    url.searchParams.set("timeMin", timeMin);
-    url.searchParams.set("timeMax", timeMax);
+    if (window !== undefined) {
+      url.searchParams.set("orderBy", "startTime");
+      url.searchParams.set("timeMin", window.timeMin);
+      url.searchParams.set("timeMax", window.timeMax);
+    }
     url.searchParams.set("conferenceDataVersion", "1");
     url.searchParams.set("maxResults", "250");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -304,17 +367,13 @@ async function fetchEventsFullWindow(
       if (result.status === 429) throw new RateLimitError(`events.list rate limited (429)`);
       if (result.status === 403 || result.status === 404) {
         console.warn(`[calendar:google] Skipping calendar ${calendarId}: HTTP ${result.status}`);
-        return { status: "complete", events, nextSyncToken: undefined };
+        return { status: "complete", events: [], nextSyncToken: undefined };
       }
       throw new NetworkError(`events.list failed (${result.status})`);
     }
 
     if (!isObjectRecord(result.json) || !Array.isArray(result.json["items"])) {
-      // Mid-chain malformed: discard partial batch (do not commit incomplete state).
-      if (page > 0 || events.length > 0) {
-        return { status: "pagination-limit" };
-      }
-      return { status: "complete", events, nextSyncToken };
+      return { status: "malformed" };
     }
 
     for (const item of result.json["items"]) {
@@ -363,7 +422,6 @@ async function fetchEventsIncremental(
   const deletedIds: string[] = [];
   let pageToken: string | undefined;
   let nextSyncToken: string | undefined;
-  let tokenParam: string | undefined = syncToken;
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const url = new URL(
@@ -372,7 +430,7 @@ async function fetchEventsIncremental(
     url.searchParams.set("singleEvents", "true");
     url.searchParams.set("conferenceDataVersion", "1");
     url.searchParams.set("maxResults", "250");
-    if (tokenParam) url.searchParams.set("syncToken", tokenParam);
+    url.searchParams.set("syncToken", syncToken);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
     const result = await googleFetch(url.toString(), accessToken, signal);
@@ -386,7 +444,7 @@ async function fetchEventsIncremental(
       throw new NetworkError(`events.list incremental failed (${result.status})`);
     }
     if (!isObjectRecord(result.json) || !Array.isArray(result.json["items"])) {
-      return { status: "complete", upserts, deletedIds, nextSyncToken };
+      return { status: "pagination-limit" };
     }
 
     for (const item of result.json["items"]) {
@@ -401,12 +459,12 @@ async function fetchEventsIncremental(
       }
       const mapped = mapGoogleEvent(item, calendarId, calendarName, userEmail);
       if (mapped) upserts.push(mapped);
+      else deletedIds.push(branded.value);
     }
 
     const next = result.json["nextPageToken"];
     if (typeof next === "string" && next.length > 0) {
       pageToken = next;
-      tokenParam = undefined;
       if (page === MAX_PAGES - 1) {
         // Discard incomplete upserts/deletes — prior index/token stay authoritative.
         return { status: "pagination-limit" };
@@ -429,28 +487,25 @@ function filterEventsInWindow(
   const minMs = new Date(timeMin).getTime();
   const maxMs = new Date(timeMax).getTime();
   return events.filter((e) => {
+    if (e.isAllDay) {
+      const startDay = new Date(e.startDate);
+      const endDay = new Date(e.endDate);
+      const localStart = new Date(
+        startDay.getUTCFullYear(),
+        startDay.getUTCMonth(),
+        startDay.getUTCDate(),
+      ).getTime();
+      const localEnd = new Date(
+        endDay.getUTCFullYear(),
+        endDay.getUTCMonth(),
+        endDay.getUTCDate(),
+      ).getTime();
+      return localEnd > minMs && localStart < maxMs;
+    }
     const start = new Date(e.startDate).getTime();
     const end = new Date(e.endDate).getTime();
     return Number.isFinite(start) && Number.isFinite(end) && end > minMs && start < maxMs;
   });
-}
-
-/** Drop process-local index entries outside the poll window after incremental apply. */
-function pruneIndexOutsideWindow(
-  index: Map<string, MeetingEvent>,
-  timeMin: string,
-  timeMax: string,
-): void {
-  const minMs = new Date(timeMin).getTime();
-  const maxMs = new Date(timeMax).getTime();
-  if (!Number.isFinite(minMs) || !Number.isFinite(maxMs)) return;
-  for (const [id, event] of index) {
-    const start = new Date(event.startDate).getTime();
-    const end = new Date(event.endDate).getTime();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= minMs || start >= maxMs) {
-      index.delete(id);
-    }
-  }
 }
 
 async function fetchEventsForCalendar(
@@ -458,54 +513,75 @@ async function fetchEventsForCalendar(
   calendarId: string,
   calendarName: string,
   userEmail: string | undefined,
-  timeMin: string,
-  timeMax: string,
-  signal?: AbortSignal,
+  context: PollContext,
 ): Promise<MeetingEvent[]> {
+  requireCurrent(context);
   const stored = (await loadGoogleSyncTokens())[calendarId];
-  let index = workingEventsByCalendar.get(calendarId);
-  if (!index) {
-    index = new Map();
-    workingEventsByCalendar.set(calendarId, index);
-  }
+  requireCurrent(context);
+  const pair = workingPairs.get(calendarId);
+  const compatible =
+    pair !== undefined &&
+    stored === pair.token &&
+    pair.timeMin === context.window.timeMin &&
+    pair.timeMax === context.window.timeMax &&
+    pair.timezone === context.window.timezone &&
+    pair.account === context.account;
 
-  if (stored && index.size > 0) {
+  if (compatible && pair !== undefined) {
     try {
       const inc = await fetchEventsIncremental(
         accessToken,
         calendarId,
         calendarName,
         userEmail,
-        stored,
-        signal,
+        pair.token,
+        context.signal,
       );
+      requireCurrent(context);
       if (inc.status === "pagination-limit") {
         // Preserve index + stored nextSyncToken; do not apply incomplete upserts/deletes.
         throw new PaginationLimitError(
           `events.list incremental pagination limit for ${calendarId}`,
         );
       }
-      for (const id of inc.deletedIds) index.delete(id);
-      for (const ev of inc.upserts) index.set(ev.id, ev);
-      pruneIndexOutsideWindow(index, timeMin, timeMax);
-      if (inc.nextSyncToken) {
-        const all = await loadGoogleSyncTokens();
-        all[calendarId] = inc.nextSyncToken;
-        await saveGoogleSyncTokens(all);
+      const nextIndex = new Map(pair.events);
+      for (const id of inc.deletedIds) nextIndex.delete(id);
+      for (const event of inc.upserts) nextIndex.set(event.id, event);
+      if (inc.nextSyncToken === undefined) {
+        workingPairs.delete(calendarId);
+        await persistToken(calendarId, null, context);
+        return filterEventsInWindow(
+          [...nextIndex.values()],
+          context.window.timeMin,
+          context.window.timeMax,
+        );
       }
-      return filterEventsInWindow([...index.values()], timeMin, timeMax);
+      workingPairs.delete(calendarId);
+      await persistToken(calendarId, inc.nextSyncToken, context);
+      workingPairs.set(calendarId, {
+        token: inc.nextSyncToken,
+        events: nextIndex,
+        ...context.window,
+        account: context.account,
+      });
+      return filterEventsInWindow(
+        [...nextIndex.values()],
+        context.window.timeMin,
+        context.window.timeMax,
+      );
     } catch (err) {
       if (err instanceof PaginationLimitError) {
         throw err;
       }
+      if (err instanceof TokenPersistenceError) throw err;
       if (err instanceof RateLimitError) {
         // 429 must not amplify into a same-poll full-window request.
         throw err;
       }
+      requireCurrent(context);
       if (err instanceof GoneError) {
-        await clearGoogleSyncToken(calendarId);
-        index.clear();
-        // fall through to full window
+        workingPairs.delete(calendarId);
+        await persistToken(calendarId, null, context);
       } else if (err instanceof AuthError) {
         throw err;
       } else {
@@ -515,36 +591,54 @@ async function fetchEventsForCalendar(
     }
   }
 
+  workingPairs.delete(calendarId);
   const full = await fetchEventsFullWindow(
     accessToken,
     calendarId,
     calendarName,
     userEmail,
-    timeMin,
-    timeMax,
-    signal,
+    undefined,
+    context.signal,
   );
+  requireCurrent(context);
+  if (full.status === "malformed") {
+    throw new PaginationLimitError(`events.list malformed items for ${calendarId}`);
+  }
   if (full.status === "pagination-limit") {
-    // Preserve prior index/token; discard incomplete full-window batch.
-    throw new PaginationLimitError(`events.list full pagination limit for ${calendarId}`);
+    const bounded = await fetchEventsFullWindow(
+      accessToken,
+      calendarId,
+      calendarName,
+      userEmail,
+      context.window,
+      context.signal,
+    );
+    requireCurrent(context);
+    if (bounded.status !== "complete") {
+      throw new PaginationLimitError(`events.list full pagination limit for ${calendarId}`);
+    }
+    await persistToken(calendarId, null, context);
+    return filterEventsInWindow(bounded.events, context.window.timeMin, context.window.timeMax);
   }
-  index.clear();
-  for (const ev of full.events) index.set(ev.id, ev);
-  if (full.nextSyncToken) {
-    const all = await loadGoogleSyncTokens();
-    all[calendarId] = full.nextSyncToken;
-    await saveGoogleSyncTokens(all);
+  await persistToken(calendarId, full.nextSyncToken ?? null, context);
+  if (full.nextSyncToken !== undefined) {
+    workingPairs.set(calendarId, {
+      token: full.nextSyncToken,
+      events: new Map(full.events.map((event) => [event.id, event])),
+      ...context.window,
+      account: context.account,
+    });
   }
-  return full.events;
+  return filterEventsInWindow(full.events, context.window.timeMin, context.window.timeMax);
 }
 
 async function fetchAllEvents(
   accessToken: string,
   userEmail: string | undefined,
-  signal?: AbortSignal,
+  context: PollContext,
 ): Promise<{ events: MeetingEvent[]; completeness: "complete" | "partial" }> {
-  const { timeMin, timeMax } = dayBoundsLocal();
-  const list = await listSelectedCalendarIds(accessToken, signal);
+  const list = await listSelectedCalendarIds(accessToken, context.signal);
+  requireCurrent(context);
   const calendarIds = list.calendarIds;
   const listIncomplete = list.status === "pagination-limit";
   const merged: MeetingEvent[] = [];
@@ -559,19 +653,19 @@ async function fetchAllEvents(
         calendarId,
         calendarId,
         userEmail,
-        timeMin,
-        timeMax,
-        signal,
+        context,
       );
       merged.push(...batch);
       successCount++;
     } catch (err) {
+      requireCurrent(context);
       if (err instanceof AuthError) throw err;
       failedCount++;
       lastError = err instanceof Error ? err : new Error(String(err));
       console.warn(`[calendar:google] Calendar ${calendarId} failed:`, lastError.message);
     }
   }
+  requireCurrent(context);
 
   if (successCount === 0 && lastError) {
     throw lastError;
@@ -598,8 +692,15 @@ export function createGoogleCalendarProvider(): CalendarProvider {
       // 60 s overall poll budget for list + pages + await of refresh/retry.
       // Composed with upstream coordinator signal; does not cancel shared OAuth.
       const budget = createPollBudgetSignal(GOOGLE_POLL_BUDGET_MS, upstreamSignal);
+      const generation = lifecycleGeneration;
+      const revision = ++pollRevision;
+      const isCurrent = (): boolean =>
+        generation === lifecycleGeneration && revision === pollRevision && !budget.signal.aborted;
       try {
-        let tokens = await ensureFreshGoogleAccessToken("if-needed");
+        await disconnectBarrier;
+        if (!isCurrent()) throw new NetworkError("Google calendar poll cancelled");
+        let tokens = await ensureFreshGoogleAccessToken("if-needed", budget.signal);
+        if (!isCurrent()) throw new NetworkError("Google calendar poll cancelled");
         if (tokens === null) {
           return calendarErr(
             formatAppError({
@@ -609,23 +710,34 @@ export function createGoogleCalendarProvider(): CalendarProvider {
             "permission-denied",
           );
         }
+        const window = dayBoundsLocal();
+        const context: PollContext = {
+          signal: budget.signal,
+          isCurrent,
+          window,
+          account: tokens.email ?? tokens.refreshToken ?? tokens.accessToken,
+        };
 
         try {
           const { events, completeness } = await fetchAllEvents(
             tokens.accessToken,
             tokens.email,
-            budget.signal,
+            context,
           );
+          requireCurrent(context);
           const observedAt = Date.now();
           // Only complete live snapshots may overwrite the encrypted cache.
           if (completeness === "complete") {
-            await saveOfflineCache(events, observedAt);
+            await saveOfflineCache(events, observedAt, isCurrent);
           }
+          requireCurrent(context);
           return calendarLiveOk(events, completeness, observedAt);
         } catch (err) {
+          requireCurrent(context);
           if (err instanceof AuthError) {
             // API 401: force one real refresh, then one retry.
-            const forced = await refreshGoogleAccessToken("force");
+            const forced = await refreshGoogleAccessToken("force", budget.signal);
+            requireCurrent(context);
             if (forced.kind !== "ok") {
               if (forced.kind === "invalidated" || forced.kind === "no-tokens") {
                 return calendarErr(
@@ -639,20 +751,28 @@ export function createGoogleCalendarProvider(): CalendarProvider {
               // transient refresh failure — try offline, do not clear
             } else {
               tokens = forced.tokens;
+              const retryContext: PollContext = {
+                ...context,
+                account: tokens.email ?? tokens.refreshToken ?? tokens.accessToken,
+              };
               try {
                 const { events, completeness } = await fetchAllEvents(
                   tokens.accessToken,
                   tokens.email,
-                  budget.signal,
+                  retryContext,
                 );
+                requireCurrent(retryContext);
                 const observedAt = Date.now();
                 if (completeness === "complete") {
-                  await saveOfflineCache(events, observedAt);
+                  await saveOfflineCache(events, observedAt, isCurrent);
                 }
+                requireCurrent(retryContext);
                 return calendarLiveOk(events, completeness, observedAt);
               } catch (retryErr) {
+                requireCurrent(retryContext);
                 if (retryErr instanceof AuthError) {
                   await clearGoogleTokens();
+                  requireCurrent(retryContext);
                   return calendarErr(
                     formatAppError({
                       kind: "calendar-auth",
@@ -669,6 +789,7 @@ export function createGoogleCalendarProvider(): CalendarProvider {
           // Network / other / transient force-refresh: try offline cache
           // Empty filtered list is still offline success (display + explicit join).
           const cache = await loadOfflineCache();
+          requireCurrent(context);
           if (cache !== null) {
             console.warn("[calendar:google] Network failure; using offline cache");
             return calendarOfflineOk(cache.events, cache.observedAt, cache.cachedAt);
@@ -711,10 +832,17 @@ export function createGoogleCalendarProvider(): CalendarProvider {
     },
 
     async disconnect(): Promise<void> {
-      await clearGoogleTokens();
-      await clearAllGoogleSyncTokens();
-      workingEventsByCalendar.clear();
-      await clearOfflineCache();
+      lifecycleGeneration++;
+      pollRevision++;
+      workingPairs.clear();
+      abortGoogleTokenRefreshLifecycle();
+      const clear = async (): Promise<void> => {
+        await clearGoogleTokens();
+        await clearAllGoogleSyncTokens();
+        await clearOfflineCache();
+      };
+      disconnectBarrier = disconnectBarrier.then(clear, clear);
+      await disconnectBarrier;
     },
 
     async getAccountLabel(): Promise<string | null> {

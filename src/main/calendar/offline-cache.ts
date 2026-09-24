@@ -29,6 +29,21 @@ export interface OfflineCachePayload {
   readonly events: MeetingEvent[];
 }
 
+const pendingByPath = new Map<string, Promise<void>>();
+
+function serialize<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const result = (pendingByPath.get(path) ?? Promise.resolve()).then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  pendingByPath.set(path, settled);
+  void settled.then(() => {
+    if (pendingByPath.get(path) === settled) pendingByPath.delete(path);
+  });
+  return result;
+}
+
 function cachePath(): string {
   return join(app.getPath("userData"), "calendar-cache.enc");
 }
@@ -98,7 +113,10 @@ function mapEvent(raw: unknown): MeetingEvent | null {
 
 function filterActiveEvents(events: MeetingEvent[], nowMs: number): MeetingEvent[] {
   return events.filter((e) => {
-    const endMs = new Date(e.endDate).getTime();
+    const endDate = new Date(e.endDate);
+    const endMs = e.isAllDay
+      ? new Date(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()).getTime()
+      : endDate.getTime();
     return Number.isFinite(endMs) && endMs > nowMs;
   });
 }
@@ -108,11 +126,9 @@ function filterActiveEvents(events: MeetingEvent[], nowMs: number): MeetingEvent
  * unknown-version, non-finite, or >5-minute-future timestamps (fail closed).
  * Ended events (`endDate <= now`) are filtered; empty list is still a valid hit.
  */
-export async function loadOfflineCache(
-  nowMs: number = Date.now(),
-): Promise<OfflineCachePayload | null> {
+async function readCache(path: string, nowMs: number): Promise<OfflineCachePayload | null> {
   try {
-    const buf = await readFile(cachePath());
+    const buf = await readFile(path);
     const json = decode(buf);
     const parsed: unknown = JSON.parse(json);
     if (!isObjectRecord(parsed)) return null;
@@ -143,6 +159,11 @@ export async function loadOfflineCache(
   }
 }
 
+export function loadOfflineCache(nowMs: number = Date.now()): Promise<OfflineCachePayload | null> {
+  const path = cachePath();
+  return serialize(path, () => readCache(path, nowMs));
+}
+
 /**
  * Persist a complete live snapshot. Callers must only pass complete results.
  * @param observedAt completion time of the live aggregation
@@ -150,31 +171,41 @@ export async function loadOfflineCache(
 export async function saveOfflineCache(
   events: MeetingEvent[],
   observedAt: number = Date.now(),
+  isCurrent?: () => boolean,
 ): Promise<void> {
-  try {
-    const now = Date.now();
-    if (!isValidCalendarTimestamp(observedAt, now)) {
-      console.warn("[calendar:cache] Refusing to save cache with invalid observedAt");
-      return;
+  const path = cachePath();
+  const snapshot = [...events];
+  await serialize(path, async () => {
+    if (isCurrent && !isCurrent()) return;
+    try {
+      const now = Date.now();
+      if (!isValidCalendarTimestamp(observedAt, now)) {
+        console.warn("[calendar:cache] Refusing to save cache with invalid observedAt");
+        return;
+      }
+      const payload: OfflineCachePayload = {
+        version: OFFLINE_CACHE_SCHEMA_VERSION,
+        observedAt,
+        cachedAt: now,
+        events: snapshot,
+      };
+      await ensureSecureDir(dirname(path));
+      if (isCurrent && !isCurrent()) return;
+      await writeSecureFile(path, encode(JSON.stringify(payload)));
+    } catch (err) {
+      console.warn("[calendar:cache] Failed to save offline cache:", err);
     }
-    const payload: OfflineCachePayload = {
-      version: OFFLINE_CACHE_SCHEMA_VERSION,
-      observedAt,
-      cachedAt: now,
-      events,
-    };
-    const path = cachePath();
-    await ensureSecureDir(dirname(path));
-    await writeSecureFile(path, encode(JSON.stringify(payload)));
-  } catch (err) {
-    console.warn("[calendar:cache] Failed to save offline cache:", err);
-  }
+  });
 }
 
-export async function clearOfflineCache(): Promise<void> {
-  try {
-    await unlink(cachePath());
-  } catch {
-    // ignore
-  }
+export function clearOfflineCache(): Promise<void> {
+  const path = cachePath();
+  return serialize(path, async () => {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+  });
 }

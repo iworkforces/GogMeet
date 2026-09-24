@@ -198,6 +198,10 @@ describe("performance probe drivers", () => {
     const { runAlertProbe } = await import("../../src/main/app/performance-probes/alert-probe.js");
     await runAlertProbe(userData);
     expect(mockShowAlert.mock.calls.length).toBeGreaterThan(100);
+    for (const call of mockShowAlert.mock.calls) {
+      expect(call[2]).toBeUndefined();
+      expect(call[3]()).toBe(true);
+    }
     expect(mockDestroyAlert).toHaveBeenCalled();
     expect(mockFlush).toHaveBeenCalled();
   }, 30_000);

@@ -16,6 +16,7 @@ interface AlertPresentation {
   event: MeetingEvent;
   onDismiss: () => void;
   autoOpenAt?: IsoUtc;
+  canShow: () => boolean;
 }
 
 function toAlertPayload(event: MeetingEvent, autoOpenAt?: IsoUtc): AlertPayload {
@@ -39,6 +40,8 @@ function toAlertPayload(event: MeetingEvent, autoOpenAt?: IsoUtc): AlertPayload 
 
 let alertWindow: BrowserWindow | null = null;
 let isAlertShowing = false;
+let activePresentation: AlertPresentation | null = null;
+let alertReady = false;
 /** FIFO queue preserves optional autoOpenAt for stacked presentations. */
 const pendingAlerts: AlertPresentation[] = [];
 /** Prefer hide/show reuse when the prior window is still alive (same security prefs). */
@@ -73,6 +76,11 @@ function processNextAlert(): void {
       isAlertShowing = false;
       return;
     }
+    if (!next.canShow()) {
+      isAlertShowing = false;
+      processNextAlert();
+      return;
+    }
     showAlertInternal(next);
   });
 }
@@ -81,9 +89,13 @@ function isCurrentPresentation(win: BrowserWindow, generation: number): boolean 
   return !win.isDestroyed() && alertWindow === win && generation === reuseGeneration;
 }
 
-export function showAlert(event: MeetingEvent, onDismiss: () => void, autoOpenAt?: IsoUtc): void {
+export function showAlert(
+  event: MeetingEvent,
+  onDismiss: () => void,
+  autoOpenAt: IsoUtc | undefined,
+  canShow: () => boolean,
+): void {
   const startMs = new Date(event.startDate).getTime();
-  // Coalesce duplicates: skip if same uid+startMs is already showing or queued.
   // If same uid but different startMs, the meeting was rescheduled — replace in-place.
   if (
     isAlertShowing &&
@@ -91,54 +103,69 @@ export function showAlert(event: MeetingEvent, onDismiss: () => void, autoOpenAt
     !alertWindow.isDestroyed() &&
     alertWindow.__alertUid === event.id
   ) {
-    if (alertWindow.__alertStartMs === startMs) {
+    const sameStart = alertWindow.__alertStartMs === startMs;
+    if (sameStart) {
+      if (activePresentation?.canShow()) return;
+    }
+    if (!canShow()) {
+      if (sameStart && !alertWindow.isVisible()) {
+        consumePresentation(alertWindow, alertWindow.__alertGeneration ?? -1);
+      }
       return;
     }
     // Rescheduled: reuse the live window with the new payload (no cancel of pending open —
     // same contract as the prior destroy/recreate path with __replacing).
-    const presentation: AlertPresentation = { event, onDismiss };
+    const presentation: AlertPresentation = { event, onDismiss, canShow };
     if (autoOpenAt !== undefined) presentation.autoOpenAt = autoOpenAt;
-    showAlertInternal(presentation);
+    showAlertInternal(presentation, sameStart && !alertReady);
     return;
   }
   const queuedIndex = pendingAlerts.findIndex((entry) => entry.event.id === event.id);
   if (queuedIndex !== -1) {
     const existing = pendingAlerts[queuedIndex];
     if (existing && new Date(existing.event.startDate).getTime() === startMs) {
-      // Same uid+start: refresh optional autoOpenAt only.
-      if (autoOpenAt !== undefined) {
-        existing.autoOpenAt = autoOpenAt;
+      if (existing.canShow()) {
+        if (autoOpenAt !== undefined) {
+          existing.autoOpenAt = autoOpenAt;
+        }
+        return;
       }
-      return;
     }
     // Replace queued entry in-place to preserve order (keep autoOpenAt).
-    const next: AlertPresentation = { event, onDismiss };
+    const next: AlertPresentation = { event, onDismiss, canShow };
     if (autoOpenAt !== undefined) next.autoOpenAt = autoOpenAt;
     pendingAlerts[queuedIndex] = next;
     return;
   }
 
   if (isAlertShowing) {
-    const entry: AlertPresentation = { event, onDismiss };
+    const entry: AlertPresentation = { event, onDismiss, canShow };
     if (autoOpenAt !== undefined) entry.autoOpenAt = autoOpenAt;
     pendingAlerts.push(entry);
     return;
   }
 
   isAlertShowing = true;
-  const presentation: AlertPresentation = { event, onDismiss };
+  const presentation: AlertPresentation = { event, onDismiss, canShow };
   if (autoOpenAt !== undefined) presentation.autoOpenAt = autoOpenAt;
   showAlertInternal(presentation);
 }
 
 function presentAlertPayload(
   win: BrowserWindow,
-  event: MeetingEvent,
+  presentation: AlertPresentation,
   generation: number,
-  autoOpenAt?: IsoUtc,
 ): void {
   if (!isCurrentPresentation(win, generation)) return;
-  typedSend(win.webContents, IPC_CHANNELS.ALERT_SHOW, toAlertPayload(event, autoOpenAt));
+  if (!presentation.canShow()) {
+    consumePresentation(win, generation);
+    return;
+  }
+  typedSend(
+    win.webContents,
+    IPC_CHANNELS.ALERT_SHOW,
+    toAlertPayload(presentation.event, presentation.autoOpenAt),
+  );
   win.webContents
     .executeJavaScript(
       `(() => {
@@ -153,6 +180,10 @@ function presentAlertPayload(
     )
     .then((contentHeight: number) => {
       if (!isCurrentPresentation(win, generation)) return;
+      if (!presentation.canShow()) {
+        consumePresentation(win, generation);
+        return;
+      }
       if (typeof contentHeight === "number" && contentHeight > 0) {
         const MIN_HEIGHT = 280;
         const MAX_HEIGHT = 480;
@@ -163,15 +194,30 @@ function presentAlertPayload(
     })
     .catch(() => {
       if (!isCurrentPresentation(win, generation)) return;
+      if (!presentation.canShow()) {
+        consumePresentation(win, generation);
+        return;
+      }
       win.show();
     });
 }
 
-function showAlertInternal(presentation: AlertPresentation): void {
-  const { event, onDismiss, autoOpenAt } = presentation;
+function consumePresentation(win: BrowserWindow, generation: number): void {
+  if (!isCurrentPresentation(win, generation)) return;
+  reuseGeneration += 1;
+  delete win.__alertOnDismiss;
+  delete win.__alertUid;
+  activePresentation = null;
+  isAlertShowing = false;
+  processNextAlert();
+}
+
+function showAlertInternal(presentation: AlertPresentation, waitForReady = false): void {
+  const { event, onDismiss } = presentation;
   const startMs = new Date(event.startDate).getTime();
   reuseGeneration += 1;
   const generation = reuseGeneration;
+  activePresentation = presentation;
 
   // Prefer reusing a hidden-but-alive window (same SECURE_WEB_PREFERENCES, no recreate).
   if (alertWindow && !alertWindow.isDestroyed()) {
@@ -182,6 +228,14 @@ function showAlertInternal(presentation: AlertPresentation): void {
     win.__alertGeneration = generation;
     win.__alertOnDismiss = onDismiss;
     applyAlertAlwaysOnTop(win);
+    if (waitForReady) {
+      win.once("ready-to-show", () => {
+        if (!isCurrentPresentation(win, generation)) return;
+        alertReady = true;
+        presentAlertPayload(win, presentation, generation);
+      });
+      return;
+    }
     if (win.isVisible()) {
       win.hide();
     }
@@ -193,7 +247,7 @@ function showAlertInternal(presentation: AlertPresentation): void {
       .catch(() => undefined)
       .then(() => {
         if (!isCurrentPresentation(win, generation)) return;
-        presentAlertPayload(win, event, generation, autoOpenAt);
+        presentAlertPayload(win, presentation, generation);
       });
     return;
   }
@@ -215,6 +269,7 @@ function showAlertInternal(presentation: AlertPresentation): void {
     },
   });
   alertWindow = win;
+  alertReady = false;
   win.__alertUid = event.id;
   win.__alertStartMs = startMs;
   win.__alertGeneration = generation;
@@ -225,7 +280,8 @@ function showAlertInternal(presentation: AlertPresentation): void {
 
   win.once("ready-to-show", () => {
     if (!isCurrentPresentation(win, generation)) return;
-    presentAlertPayload(win, event, generation, autoOpenAt);
+    alertReady = true;
+    presentAlertPayload(win, presentation, generation);
   });
 
   // Prefer hide over destroy so the next alert can reuse this window (same webPreferences).
@@ -239,6 +295,7 @@ function showAlertInternal(presentation: AlertPresentation): void {
     }
     win.__replacing = false;
     if (!win.isDestroyed()) win.hide();
+    activePresentation = null;
     isAlertShowing = false;
     processNextAlert();
   });
@@ -246,6 +303,8 @@ function showAlertInternal(presentation: AlertPresentation): void {
   win.on("closed", () => {
     // Only the current window ref may clear shared module state.
     if (alertWindow !== win) return;
+    activePresentation = null;
+    alertReady = false;
     if ((win.__alertGeneration ?? -1) !== reuseGeneration) {
       alertWindow = null;
       return;
@@ -267,6 +326,8 @@ export function destroyAlertWindow(): void {
     alertWindow.destroy();
   }
   alertWindow = null;
+  activePresentation = null;
+  alertReady = false;
   isAlertShowing = false;
   pendingAlerts.length = 0;
 }

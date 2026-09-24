@@ -164,10 +164,12 @@ describe("calendar publication vertical path", () => {
     };
     const deferredGenerationOne = Promise.withResolvers<CalendarPublication>();
     const graphCallStarted = Promise.withResolvers<void>();
-    const getEvents = vi.fn(() => {
-      graphCallStarted.resolve();
-      return deferredGenerationOne.promise;
-    });
+    const getEvents = vi
+      .fn(() => Promise.resolve(generationTwo))
+      .mockImplementationOnce(() => {
+        graphCallStarted.resolve();
+        return deferredGenerationOne.promise;
+      });
     const getPermissionStatus = vi.fn(async () => "granted" as const);
 
     try {
@@ -246,6 +248,7 @@ describe("calendar publication vertical path", () => {
       await rendererInitialized.promise;
       expect(document.body.textContent).toContain("Pushed generation two");
       expect(document.body.textContent).not.toContain("Deferred generation one");
+      expect(await api.calendar.getEvents()).toEqual(generationTwo);
 
       removeTrackedDocumentListeners();
       removeTrackedDocumentListeners = null;
