@@ -67,15 +67,17 @@ function makeEvent(overrides: Partial<MeetingEvent> = {}): MeetingEvent {
 }
 
 function showAlert(event: MeetingEvent, autoOpenAt?: IsoUtc): void {
-  showAlertPresentation(event, () => undefined, autoOpenAt);
+  showAlertPresentation(
+    event,
+    () => undefined,
+    autoOpenAt,
+    () => true,
+  );
 }
 
 /** Get the nth BrowserWindow instance created (1-indexed) */
 function getWindow(n: number): Record<string, unknown> {
-  return vi.mocked(BrowserWindow).mock.results[n - 1].value as Record<
-    string,
-    unknown
-  >;
+  return vi.mocked(BrowserWindow).mock.results[n - 1].value as Record<string, unknown>;
 }
 
 /** Fire a captured event handler on a mock window instance */
@@ -176,20 +178,16 @@ describe("alert-window", () => {
       showAlert(makeEvent());
 
       const mockWin = getWindow(1);
-      expect(mockWin.loadURL).toHaveBeenCalledWith(
-        expect.stringContaining("/alert.html"),
-      );
+      expect(mockWin.loadURL).toHaveBeenCalledWith(expect.stringContaining("/alert.html"));
     });
 
     it("loads from file in production (no env var)", () => {
-      (app.As<Record<string, unknown>>()).isPackaged = true;
+      app.As<Record<string, unknown>>().isPackaged = true;
       showAlert(makeEvent());
-      (app.As<Record<string, unknown>>()).isPackaged = false;
+      app.As<Record<string, unknown>>().isPackaged = false;
 
       const mockWin = getWindow(1);
-      expect(mockWin.loadFile).toHaveBeenCalledWith(
-        expect.stringContaining("alert.html"),
-      );
+      expect(mockWin.loadFile).toHaveBeenCalledWith(expect.stringContaining("alert.html"));
     });
   });
 
@@ -215,10 +213,7 @@ describe("alert-window", () => {
       fireEvent(win, "ready-to-show");
 
       expect(mockSend).toHaveBeenCalledTimes(1);
-      expect(mockSend).toHaveBeenCalledWith(
-        "alert:show",
-        expect.objectContaining({ id: "rc-1" }),
-      );
+      expect(mockSend).toHaveBeenCalledWith("alert:show", expect.objectContaining({ id: "rc-1" }));
     });
 
     it("sends correct AlertPayload for event without meetUrl", () => {
@@ -252,9 +247,7 @@ describe("alert-window", () => {
       fireEvent(win, "ready-to-show");
 
       // webContents.send should NOT be called — guard bailed out
-      expect(
-        (win.webContents as { send: ReturnType<typeof vi.fn> }).send,
-      ).not.toHaveBeenCalled();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
     });
 
     it("processes the queued alert by reusing the window after dismiss", async () => {
@@ -285,9 +278,8 @@ describe("alert-window", () => {
 
       showAlert(makeEvent({ id: "destroyed-before-ready" }));
       const win = getWindow(1);
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       // Window gets destroyed before ready-to-show fires
       win.isDestroyed = vi.fn(() => true);
@@ -306,9 +298,8 @@ describe("alert-window", () => {
       const win = getWindow(1);
       win.show = mockShow;
       win.setSize = mockSetSize;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       fireEvent(win, "ready-to-show");
 
@@ -330,9 +321,8 @@ describe("alert-window", () => {
       showAlert(makeEvent({ id: "min-height" }));
       const win = getWindow(1);
       win.setSize = mockSetSize;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       fireEvent(win, "ready-to-show");
       vi.advanceTimersByTime(150);
@@ -349,9 +339,8 @@ describe("alert-window", () => {
       showAlert(makeEvent({ id: "max-height" }));
       const win = getWindow(1);
       win.setSize = mockSetSize;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       fireEvent(win, "ready-to-show");
       vi.advanceTimersByTime(150);
@@ -368,9 +357,8 @@ describe("alert-window", () => {
       showAlert(makeEvent({ id: "js-error" }));
       const win = getWindow(1);
       win.show = mockShow;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       fireEvent(win, "ready-to-show");
       vi.advanceTimersByTime(150);
@@ -386,9 +374,8 @@ describe("alert-window", () => {
       showAlert(makeEvent({ id: "catch-destroyed" }));
       const win = getWindow(1);
       win.show = mockShow;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = mockExecuteJS;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        mockExecuteJS;
 
       fireEvent(win, "ready-to-show");
       vi.advanceTimersByTime(150);
@@ -471,7 +458,7 @@ describe("alert-window", () => {
     describe("close-handler cancels pending browser-open", () => {
       it("cancels pending browser-open when user dismisses alert", () => {
         const onDismiss = vi.fn();
-        showAlertPresentation(makeEvent({ id: "dismiss-me" }), onDismiss);
+        showAlertPresentation(makeEvent({ id: "dismiss-me" }), onDismiss, undefined, () => true);
         const win = getWindow(1);
         fireEvent(win, "close");
         expect(onDismiss).toHaveBeenCalledTimes(1);
@@ -483,12 +470,16 @@ describe("alert-window", () => {
         showAlertPresentation(
           makeEvent({ id: "resched", startDate: "2026-05-11T10:00:00Z" }),
           firstDismiss,
+          undefined,
+          () => true,
         );
         const win1 = getWindow(1);
         win1.__alertStartMs = new Date("2026-05-11T10:00:00Z").getTime();
         showAlertPresentation(
           makeEvent({ id: "resched", startDate: "2026-05-11T14:00:00Z" }),
           rescheduledDismiss,
+          undefined,
+          () => true,
         );
         // No close path — reuse only
         expect(firstDismiss).not.toHaveBeenCalled();
@@ -498,7 +489,12 @@ describe("alert-window", () => {
 
       it("does NOT cancel browser-open on force destroy", () => {
         const onDismiss = vi.fn();
-        showAlertPresentation(makeEvent({ id: "force-no-cancel" }), onDismiss);
+        showAlertPresentation(
+          makeEvent({ id: "force-no-cancel" }),
+          onDismiss,
+          undefined,
+          () => true,
+        );
         destroyAlertWindow();
         expect(onDismiss).not.toHaveBeenCalled();
       });
@@ -506,9 +502,19 @@ describe("alert-window", () => {
       it("keeps the owning dismiss handler for each queued presentation", async () => {
         const firstDismiss = vi.fn();
         const secondDismiss = vi.fn();
-        showAlertPresentation(makeEvent({ id: "owner-first" }), firstDismiss);
+        showAlertPresentation(
+          makeEvent({ id: "owner-first" }),
+          firstDismiss,
+          undefined,
+          () => true,
+        );
         const win = getWindow(1);
-        showAlertPresentation(makeEvent({ id: "owner-second" }), secondDismiss);
+        showAlertPresentation(
+          makeEvent({ id: "owner-second" }),
+          secondDismiss,
+          undefined,
+          () => true,
+        );
 
         fireEvent(win, "close");
         expect(firstDismiss).toHaveBeenCalledTimes(1);
@@ -527,6 +533,8 @@ describe("alert-window", () => {
         showAlertPresentation(
           makeEvent({ id: "replacement-owner", startDate: firstStart }),
           firstDismiss,
+          undefined,
+          () => true,
         );
         const win = getWindow(1);
         win.__alertStartMs = new Date(firstStart).getTime();
@@ -534,6 +542,8 @@ describe("alert-window", () => {
         showAlertPresentation(
           makeEvent({ id: "replacement-owner", startDate: "2026-05-11T14:00:00Z" }),
           replacementDismiss,
+          undefined,
+          () => true,
         );
         fireEvent(win, "close");
 
@@ -575,19 +585,13 @@ describe("alert-window", () => {
 
       await vi.runAllTimersAsync();
       expect(BrowserWindow).toHaveBeenCalledTimes(1);
-      expect(mockSend).toHaveBeenCalledWith(
-        "alert:show",
-        expect.objectContaining({ id: "own-b" }),
-      );
+      expect(mockSend).toHaveBeenCalledWith("alert:show", expect.objectContaining({ id: "own-b" }));
 
       // Dismiss B → C
       mockSend.mockClear();
       fireEvent(win, "close");
       await vi.runAllTimersAsync();
-      expect(mockSend).toHaveBeenCalledWith(
-        "alert:show",
-        expect.objectContaining({ id: "own-c" }),
-      );
+      expect(mockSend).toHaveBeenCalledWith("alert:show", expect.objectContaining({ id: "own-c" }));
     });
 
     it("ignores stale height resolution after a newer generation owns the window", async () => {
@@ -608,14 +612,13 @@ describe("alert-window", () => {
       (win.webContents as { send: ReturnType<typeof vi.fn> }).send = mockSend;
 
       let call = 0;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = vi.fn(() => {
-        call += 1;
-        // First present (A): deferred height. Clear-DOM / B height resolve immediately.
-        if (call === 1) return heightA;
-        return Promise.resolve(320);
-      });
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        vi.fn(() => {
+          call += 1;
+          // First present (A): deferred height. Clear-DOM / B height resolve immediately.
+          if (call === 1) return heightA;
+          return Promise.resolve(320);
+        });
 
       fireEvent(win, "ready-to-show");
       // A is measuring; same-uid reschedule replaces in-place (new generation).
@@ -640,9 +643,8 @@ describe("alert-window", () => {
       const win = getWindow(1);
       const mockShow = vi.fn();
       win.show = mockShow;
-      (
-        win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }
-      ).executeJavaScript = vi.fn(() => heightP);
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript =
+        vi.fn(() => heightP);
 
       fireEvent(win, "ready-to-show");
       destroyAlertWindow();
@@ -701,12 +703,12 @@ describe("alert-window", () => {
     it("ignores stale close/closed after a newer window is current", async () => {
       const dismissA = vi.fn();
       const dismissB = vi.fn();
-      showAlertPresentation(makeEvent({ id: "close-a" }), dismissA);
+      showAlertPresentation(makeEvent({ id: "close-a" }), dismissA, undefined, () => true);
       const winA = getWindow(1);
       // True destroy path leaves A without being the current ref.
       fireEvent(winA, "closed");
 
-      showAlertPresentation(makeEvent({ id: "close-b" }), dismissB);
+      showAlertPresentation(makeEvent({ id: "close-b" }), dismissB, undefined, () => true);
       const winB = getWindow(2);
       expect(BrowserWindow).toHaveBeenCalledTimes(2);
 
@@ -718,6 +720,442 @@ describe("alert-window", () => {
       // Current B dismiss still cancels once.
       fireEvent(winB, "close");
       expect(dismissB).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("presentation eligibility", () => {
+    it("does not treat an obsolete ready callback as readiness for a later same-start owner", async () => {
+      let firstEligible = true;
+      let secondEligible = true;
+      const event = makeEvent({ id: "same-ready-chain", startDate: "2026-05-11T10:00:00Z" });
+      showAlertPresentation({ ...event, title: "first" }, vi.fn(), undefined, () => firstEligible);
+      const win = getWindow(1);
+      const readyHandlers = win._onceHandlers.As<Map<string, () => void>>();
+      const firstReady = readyHandlers.get("ready-to-show")!;
+      firstEligible = false;
+      showAlertPresentation(
+        { ...event, title: "second" },
+        vi.fn(),
+        undefined,
+        () => secondEligible,
+      );
+      firstReady();
+      secondEligible = false;
+      showAlertPresentation({ ...event, title: "third" }, vi.fn(), undefined, () => true);
+
+      const send = (win.webContents as { send: ReturnType<typeof vi.fn> }).send;
+      await vi.runAllTimersAsync();
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ title: "third" }),
+      );
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+      expect(send).toHaveBeenCalledWith("alert:show", expect.objectContaining({ title: "third" }));
+    });
+
+    it("replaces a revoked same-start owner before ready without replaying its callback", async () => {
+      let oldEligible = true;
+      const oldDismiss = vi.fn();
+      const newDismiss = vi.fn();
+      const startDate = "2026-05-11T10:00:00Z";
+      showAlertPresentation(
+        makeEvent({ id: "same-ready", startDate, title: "old" }),
+        oldDismiss,
+        undefined,
+        () => oldEligible,
+      );
+      const win = getWindow(1);
+      const send = (win.webContents as { send: ReturnType<typeof vi.fn> }).send;
+      oldEligible = false;
+      showAlertPresentation(
+        makeEvent({ id: "same-ready", startDate, title: "new" }),
+        newDismiss,
+        undefined,
+        () => true,
+      );
+
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+
+      expect(send).toHaveBeenCalledWith("alert:show", expect.objectContaining({ title: "new" }));
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ title: "old" }),
+      );
+      fireEvent(win, "close");
+      expect(oldDismiss).not.toHaveBeenCalled();
+      expect(newDismiss).toHaveBeenCalledOnce();
+    });
+
+    it("keeps a same-start successor reserved while an obsolete height promise settles", async () => {
+      let oldEligible = true;
+      let finishOldHeight: (height: number) => void = () => undefined;
+      let finishNewHeight: (height: number) => void = () => undefined;
+      const oldHeight = new Promise<number>((resolve) => {
+        finishOldHeight = resolve;
+      });
+      const newHeight = new Promise<number>((resolve) => {
+        finishNewHeight = resolve;
+      });
+      const oldDismiss = vi.fn();
+      const newDismiss = vi.fn();
+      const startDate = "2026-05-11T10:00:00Z";
+      showAlertPresentation(
+        makeEvent({ id: "same-height", startDate, title: "old" }),
+        oldDismiss,
+        undefined,
+        () => oldEligible,
+      );
+      const win = getWindow(1);
+      const send = (win.webContents as { send: ReturnType<typeof vi.fn> }).send;
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript = vi
+        .fn()
+        .mockReturnValueOnce(oldHeight)
+        .mockResolvedValueOnce(true)
+        .mockReturnValueOnce(newHeight)
+        .mockResolvedValue(320);
+      fireEvent(win, "ready-to-show");
+      oldEligible = false;
+      showAlertPresentation(
+        makeEvent({ id: "same-height", startDate, title: "new" }),
+        newDismiss,
+        undefined,
+        () => true,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      showAlert(makeEvent({ id: "behind" }));
+
+      finishOldHeight(320);
+      await Promise.resolve();
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "behind" }),
+      );
+      finishNewHeight(320);
+      await vi.runAllTimersAsync();
+
+      expect(send).toHaveBeenCalledWith("alert:show", expect.objectContaining({ title: "new" }));
+      expect(win.show).toHaveBeenCalledTimes(1);
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "behind" }),
+      );
+      fireEvent(win, "close");
+      expect(oldDismiss).not.toHaveBeenCalled();
+      expect(newDismiss).toHaveBeenCalledOnce();
+    });
+
+    it("replaces a revoked same-start queued owner without changing FIFO position", async () => {
+      let oldEligible = true;
+      const oldDismiss = vi.fn();
+      const newDismiss = vi.fn();
+      const startDate = "2026-05-11T10:00:00Z";
+      const autoOpenAt = (await import("../helpers/test-utils.js")).asTestIsoUtc(
+        "2026-05-11T10:05:00.000Z",
+      );
+      showAlert(makeEvent({ id: "first" }));
+      const win = getWindow(1);
+      const send = (win.webContents as { send: ReturnType<typeof vi.fn> }).send;
+      showAlertPresentation(
+        makeEvent({ id: "queued-same", startDate, title: "old" }),
+        oldDismiss,
+        undefined,
+        () => oldEligible,
+      );
+      showAlert(makeEvent({ id: "third" }));
+      oldEligible = false;
+      showAlertPresentation(
+        makeEvent({ id: "queued-same", startDate, title: "new" }),
+        newDismiss,
+        autoOpenAt,
+        () => true,
+      );
+
+      fireEvent(win, "close");
+      await vi.runAllTimersAsync();
+
+      expect(send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ title: "new", autoOpenAt }),
+      );
+      expect(send).not.toHaveBeenCalledWith("alert:show", expect.objectContaining({ id: "third" }));
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ title: "old" }),
+      );
+      fireEvent(win, "close");
+      expect(oldDismiss).not.toHaveBeenCalled();
+      expect(newDismiss).toHaveBeenCalledOnce();
+      await vi.runAllTimersAsync();
+      expect(send).toHaveBeenCalledWith("alert:show", expect.objectContaining({ id: "third" }));
+    });
+
+    it("does not hide a visible same-start predecessor for an ineligible replacement", async () => {
+      const oldDismiss = vi.fn();
+      const newDismiss = vi.fn();
+      const event = makeEvent({ id: "visible-same", startDate: "2026-05-11T10:00:00Z" });
+      showAlertPresentation(event, oldDismiss, undefined, () => true);
+      const win = getWindow(1);
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+      showAlertPresentation({ ...event, title: "ineligible" }, newDismiss, undefined, () => false);
+
+      expect(win.hide).not.toHaveBeenCalled();
+      fireEvent(win, "close");
+      expect(oldDismiss).toHaveBeenCalledOnce();
+      expect(newDismiss).not.toHaveBeenCalled();
+    });
+
+    it("drains a hidden revoked same-start owner when its replacement is also ineligible", async () => {
+      let oldEligible = true;
+      const oldDismiss = vi.fn();
+      const newDismiss = vi.fn();
+      const event = makeEvent({ id: "hidden-same", startDate: "2026-05-11T10:00:00Z" });
+      showAlertPresentation(event, oldDismiss, undefined, () => oldEligible);
+      const win = getWindow(1);
+      win.isVisible = vi.fn(() => false);
+      const send = (win.webContents as { send: ReturnType<typeof vi.fn> }).send;
+      showAlert(makeEvent({ id: "next-after-hidden" }));
+      oldEligible = false;
+      showAlertPresentation({ ...event, title: "ineligible" }, newDismiss, undefined, () => false);
+
+      await vi.runAllTimersAsync();
+
+      expect(send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "next-after-hidden" }),
+      );
+      expect(send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "hidden-same" }),
+      );
+      expect(oldDismiss).not.toHaveBeenCalled();
+      expect(newDismiss).not.toHaveBeenCalled();
+    });
+
+    it("consumes an ineligible alert before initial ready without dismissing it", async () => {
+      let eligible = true;
+      const dismiss = vi.fn();
+      showAlertPresentation(makeEvent({ id: "early" }), dismiss, undefined, () => eligible);
+      const win = getWindow(1);
+      showAlert(makeEvent({ id: "next" }));
+      eligible = false;
+
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+
+      expect(win.show).toHaveBeenCalledTimes(1);
+      expect(dismiss).not.toHaveBeenCalled();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "early" }),
+      );
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "next" }),
+      );
+    });
+
+    it("checks eligibility after a queued immediate before reusing the window", async () => {
+      let eligible = true;
+      showAlert(makeEvent({ id: "first" }));
+      const win = getWindow(1);
+      const dismiss = vi.fn();
+      showAlertPresentation(makeEvent({ id: "second" }), dismiss, undefined, () => eligible);
+      showAlert(makeEvent({ id: "third" }));
+      fireEvent(win, "close");
+      eligible = false;
+
+      await vi.runAllTimersAsync();
+
+      expect(dismiss).not.toHaveBeenCalled();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "second" }),
+      );
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "third" }),
+      );
+    });
+
+    it("consumes a reused alert when eligibility changes during DOM clear", async () => {
+      let eligible = true;
+      let finishClear: (value: boolean) => void = () => undefined;
+      const clear = new Promise<boolean>((resolve) => {
+        finishClear = resolve;
+      });
+      showAlert(makeEvent({ id: "first" }));
+      const win = getWindow(1);
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript = vi
+        .fn()
+        .mockReturnValueOnce(clear)
+        .mockResolvedValue(320);
+      const dismiss = vi.fn();
+      showAlertPresentation(makeEvent({ id: "clearing" }), dismiss, undefined, () => eligible);
+      showAlert(makeEvent({ id: "last" }));
+      fireEvent(win, "close");
+      await vi.advanceTimersToNextTimerAsync();
+      eligible = false;
+
+      finishClear(true);
+      await vi.runAllTimersAsync();
+
+      expect(dismiss).not.toHaveBeenCalled();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "clearing" }),
+      );
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "last" }),
+      );
+    });
+
+    it.each(["resolve", "reject"])(
+      "consumes an alert when eligibility changes before height %s",
+      async (settlement) => {
+        let eligible = true;
+        let resolveHeight: (height: number) => void = () => undefined;
+        let rejectHeight: (error: Error) => void = () => undefined;
+        const height = new Promise<number>((resolve, reject) => {
+          resolveHeight = resolve;
+          rejectHeight = reject;
+        });
+        const dismiss = vi.fn();
+        showAlertPresentation(
+          makeEvent({ id: "height-owner" }),
+          dismiss,
+          undefined,
+          () => eligible,
+        );
+        const win = getWindow(1);
+        (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript = vi
+          .fn()
+          .mockReturnValueOnce(height)
+          .mockResolvedValue(320);
+        fireEvent(win, "ready-to-show");
+        showAlert(makeEvent({ id: "height-next" }));
+        eligible = false;
+
+        if (settlement === "resolve") resolveHeight(350);
+        else rejectHeight(new Error("height failed"));
+        await vi.runAllTimersAsync();
+
+        expect(win.show).toHaveBeenCalledTimes(1);
+        expect(dismiss).not.toHaveBeenCalled();
+        expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledWith(
+          "alert:show",
+          expect.objectContaining({ id: "height-next" }),
+        );
+      },
+    );
+
+    it("drains ineligible B to eligible C while visible A retains its dismiss", async () => {
+      let eligible = true;
+      const dismissA = vi.fn();
+      const dismissB = vi.fn();
+      showAlertPresentation(makeEvent({ id: "visible-a" }), dismissA, undefined, () => eligible);
+      const win = getWindow(1);
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+      showAlertPresentation(makeEvent({ id: "skipped-b" }), dismissB, undefined, () => eligible);
+      showAlert(makeEvent({ id: "visible-c" }));
+      eligible = false;
+      expect(win.hide).not.toHaveBeenCalled();
+
+      fireEvent(win, "close");
+      await vi.runAllTimersAsync();
+
+      expect(dismissA).toHaveBeenCalledOnce();
+      expect(dismissB).not.toHaveBeenCalled();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "skipped-b" }),
+      );
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "visible-c" }),
+      );
+    });
+
+    it("does not hide a visible predecessor for an ineligible reschedule", async () => {
+      let eligible = true;
+      const originalDismiss = vi.fn();
+      const replacementDismiss = vi.fn();
+      showAlertPresentation(
+        makeEvent({ id: "same", startDate: "2026-05-11T10:00:00Z" }),
+        originalDismiss,
+        undefined,
+        () => true,
+      );
+      const win = getWindow(1);
+      fireEvent(win, "ready-to-show");
+      await vi.runAllTimersAsync();
+      eligible = false;
+      showAlertPresentation(
+        makeEvent({ id: "same", startDate: "2026-05-11T11:00:00Z" }),
+        replacementDismiss,
+        undefined,
+        () => eligible,
+      );
+
+      await vi.runAllTimersAsync();
+      fireEvent(win, "close");
+
+      expect(win.hide).toHaveBeenCalledTimes(1);
+      expect(originalDismiss).toHaveBeenCalledOnce();
+      expect(replacementDismiss).not.toHaveBeenCalled();
+    });
+
+    it("does not let an obsolete height completion release a successor slot", async () => {
+      let eligible = true;
+      let resolveOld: (height: number) => void = () => undefined;
+      let resolveNew: (height: number) => void = () => undefined;
+      const oldHeight = new Promise<number>((resolve) => {
+        resolveOld = resolve;
+      });
+      const newHeight = new Promise<number>((resolve) => {
+        resolveNew = resolve;
+      });
+      showAlertPresentation(
+        makeEvent({ id: "race", startDate: "2026-05-11T10:00:00Z" }),
+        vi.fn(),
+        undefined,
+        () => eligible,
+      );
+      const win = getWindow(1);
+      (win.webContents as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript = vi
+        .fn()
+        .mockReturnValueOnce(oldHeight)
+        .mockResolvedValueOnce(true)
+        .mockReturnValueOnce(newHeight);
+      fireEvent(win, "ready-to-show");
+      showAlertPresentation(
+        makeEvent({ id: "race", startDate: "2026-05-11T11:00:00Z" }),
+        vi.fn(),
+        undefined,
+        () => true,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      showAlert(makeEvent({ id: "behind" }));
+      eligible = false;
+
+      resolveOld(320);
+      await Promise.resolve();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "behind" }),
+      );
+      resolveNew(320);
+      await vi.runAllTimersAsync();
+      expect((win.webContents as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalledWith(
+        "alert:show",
+        expect.objectContaining({ id: "behind" }),
+      );
     });
   });
 });
