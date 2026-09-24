@@ -1565,6 +1565,140 @@ describe("REGRESSION: same-id reschedule from in-progress to future start", () =
       expect.objectContaining({ id: "rs4" }),
       expect.anything(),
       expect.any(String),
+      expect.any(Function),
     );
+  });
+});
+
+describe("live quiet-hours alert scheduling", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetFixture();
+    vi.mocked(mockShowAlert).mockClear();
+  });
+
+  afterEach(() => {
+    facade.stop();
+    vi.mocked(mockGetSettings).mockReturnValue({ ...DEFAULT_SETTINGS, openBeforeMinutes: 3 });
+    vi.useRealTimers();
+  });
+
+  it("arms while quiet but presents after quiet ends without replaying on subsequent polls", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 6, 59));
+    vi.mocked(mockGetSettings).mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      openBeforeMinutes: 3,
+      quietHoursEnabled: true,
+      quietHoursStart: "22:00",
+      quietHoursEnd: "07:00",
+    });
+    const event = makeEvent({
+      id: "quiet-planned",
+      startDate: new Date(Date.now() + 6 * 60_000).toISOString(),
+      endDate: new Date(Date.now() + 36 * 60_000).toISOString(),
+    });
+    scheduleEvents([event]);
+    expect(runtime.state.alertTimers.has(event.id)).toBe(true);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(mockShowAlert).toHaveBeenCalledTimes(1);
+    expect(runtime.state.alertFiredEvents.has(event.id)).toBe(true);
+    scheduleEvents([]);
+    scheduleEvents([event]);
+    expect(runtime.state.alertTimers.has(event.id)).toBe(false);
+    expect(mockShowAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes a quiet callback without cancelling browser open or rearming the alert", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 21, 59));
+    vi.mocked(mockGetSettings).mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      openBeforeMinutes: 3,
+      quietHoursEnabled: true,
+      quietHoursStart: "22:00",
+      quietHoursEnd: "07:00",
+    });
+    const event = makeEvent({
+      id: "quiet-fired",
+      startDate: new Date(Date.now() + 6 * 60_000).toISOString(),
+      endDate: new Date(Date.now() + 36 * 60_000).toISOString(),
+    });
+    scheduleEvents([event]);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(mockShowAlert).not.toHaveBeenCalled();
+    expect(runtime.state.alertFiredEvents.has(event.id)).toBe(true);
+    expect(runtime.state.timers.has(event.id)).toBe(true);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+    scheduleEvents([]);
+    scheduleEvents([event]);
+    expect(runtime.state.alertTimers.has(event.id)).toBe(false);
+    vi.advanceTimersByTime(60_000);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
+    expect(mockShowAlert).not.toHaveBeenCalled();
+  });
+
+  it("a dismissal from before restart cannot cancel the restarted browser timer", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 12, 0));
+    const event = makeEvent({
+      id: "restart-alert",
+      startDate: new Date(Date.now() + 6 * 60_000).toISOString(),
+      endDate: new Date(Date.now() + 36 * 60_000).toISOString(),
+    });
+    scheduleEvents([event]);
+    vi.advanceTimersByTime(2 * 60_000);
+    const dismissal = vi.mocked(mockShowAlert).mock.calls[0]?.[1];
+    const canShow = vi.mocked(mockShowAlert).mock.calls[0]?.[3];
+    expect(dismissal).toBeTypeOf("function");
+
+    facade.restart();
+    scheduleEvents([event]);
+    expect(runtime.state.timers.has(event.id)).toBe(true);
+    dismissal?.();
+    expect(canShow?.()).toBe(false);
+    expect(runtime.state.timers.has(event.id)).toBe(true);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+  });
+
+  it.each(["URL", "openAt"])(
+    "snapshot %s replacement revokes a queued presentation without a new alert firing",
+    (field) => {
+      vi.setSystemTime(new Date(2026, 0, 2, 12, 0));
+      const event = makeEvent({
+        id: "url-replaced-alert",
+        startDate: new Date(Date.now() + 6 * 60_000).toISOString(),
+        endDate: new Date(Date.now() + 36 * 60_000).toISOString(),
+      });
+      scheduleEvents([event]);
+      vi.advanceTimersByTime(2 * 60_000);
+      const oldDismissal = vi.mocked(mockShowAlert).mock.calls[0]?.[1];
+      const oldCanShow = vi.mocked(mockShowAlert).mock.calls[0]?.[3];
+      if (field === "openAt") {
+        vi.mocked(mockGetSettings).mockReturnValue({ ...DEFAULT_SETTINGS, openBeforeMinutes: 2 });
+      }
+      const replacement = field === "URL" ? { ...event, meetUrl: undefined } : event;
+
+      scheduleEvents([replacement]);
+      const browserHandle = runtime.state.timers.get(event.id);
+      expect(browserHandle).toBeDefined();
+      expect(mockShowAlert).toHaveBeenCalledTimes(1);
+      expect(oldCanShow?.()).toBe(false);
+      oldDismissal?.();
+      expect(runtime.state.timers.get(event.id)).toBe(browserHandle);
+      expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+    },
+  );
+
+  it("pruning an absent event revokes a fired alert presentation", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 12, 0));
+    const event = makeEvent({
+      id: "pruned-alert",
+      startDate: new Date(Date.now() + 6 * 60_000).toISOString(),
+      endDate: new Date(Date.now() + 36 * 60_000).toISOString(),
+    });
+    scheduleEvents([event]);
+    vi.advanceTimersByTime(2 * 60_000);
+    const oldCanShow = vi.mocked(mockShowAlert).mock.calls[0]?.[3];
+
+    scheduleEvents([]);
+    expect(oldCanShow?.()).toBe(false);
   });
 });

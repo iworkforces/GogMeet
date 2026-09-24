@@ -5,6 +5,8 @@ import { FIRED_EVENT_TTL_MS } from "./state/state-timers.js";
 import { showAlert } from "../windows/alert-window.js";
 import type { SchedulerRuntime } from "./runtime.js";
 import { cancelPendingBrowserOpenForState } from "./cancel-pending-browser-open.js";
+import { isInQuietHours } from "../../domain/entities/settings.js";
+import type { TimersState } from "./state/state-timers.js";
 
 /** Default alert lead before browser open (overridden by settings). */
 const DEFAULT_ALERT_OFFSET_MS = 60 * 1000;
@@ -24,8 +26,12 @@ export function scheduleAlertTimer(
   alertLeadMs: number = DEFAULT_ALERT_OFFSET_MS,
   openAtMs?: number,
 ): void {
-  const { alertTimers, alertFiredEvents } = runtime.state;
-  cancelAlertTimer(event.id, alertTimers);
+  const state = runtime.state;
+  const generation = runtime.lifecycleGeneration;
+  const { alertTimers, alertFiredEvents, alertOwners } = state;
+  cancelAlertTimer(event.id, state);
+  const owner = {};
+  alertOwners.set(event.id, owner);
 
   const alertDelayMs = Math.max(0, effectiveDelay - alertLeadMs);
   const autoOpenAt: IsoUtc | undefined = (() => {
@@ -35,11 +41,38 @@ export function scheduleAlertTimer(
   })();
 
   const alertHandle = setTimeout(() => {
+    if (
+      runtime.state !== state ||
+      runtime.lifecycleGeneration !== generation ||
+      alertTimers.get(event.id) !== alertHandle ||
+      alertOwners.get(event.id) !== owner
+    )
+      return;
     if (shouldAbort?.()) return;
     alertTimers.delete(event.id);
     alertFiredEvents.set(event.id, endMs + FIRED_EVENT_TTL_MS);
+    const isCurrent = (): boolean =>
+      runtime.state === state &&
+      runtime.lifecycleGeneration === generation &&
+      alertOwners.get(event.id) === owner;
+    const canShow = (): boolean => {
+      if (!isCurrent()) return false;
+      const settings = runtime.dependencies.settings.get();
+      return !(
+        settings.quietHoursEnabled &&
+        isInQuietHours(new Date(), settings.quietHoursStart, settings.quietHoursEnd)
+      );
+    };
+    if (!canShow()) return;
     try {
-      showAlert(event, () => cancelPendingBrowserOpenForState(event.id, runtime.state), autoOpenAt);
+      showAlert(
+        event,
+        () => {
+          if (isCurrent()) cancelPendingBrowserOpenForState(event.id, state);
+        },
+        autoOpenAt,
+        canShow,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[scheduler] Alert presentation failed:", message);
@@ -54,13 +87,11 @@ export function scheduleAlertTimer(
 /**
  * Cancel an alert timer for a specific event.
  */
-export function cancelAlertTimer(
-  eventId: EventId,
-  alertTimers: Map<EventId, ReturnType<typeof setTimeout>>,
-): void {
-  const handle = alertTimers.get(eventId);
+export function cancelAlertTimer(eventId: EventId, state: TimersState): void {
+  state.alertOwners.delete(eventId);
+  const handle = state.alertTimers.get(eventId);
   if (handle) {
     clearTimeout(handle);
-    alertTimers.delete(eventId);
+    state.alertTimers.delete(eventId);
   }
 }

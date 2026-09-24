@@ -67,7 +67,7 @@ export function cancelStaleEntries(
   activeIds: Set<EventId>,
   callbacks?: {
     onBrowserCancel?: (id: EventId, timers: Map<EventId, ReturnType<typeof setTimeout>>) => void;
-    onAlertCancel?: (id: EventId, alertTimers: Map<EventId, ReturnType<typeof setTimeout>>) => void;
+    onAlertCancel?: (id: EventId, state: SchedulerState) => void;
     onCountdownIntervalCancel?: () => void;
     onPruneCancelledEvents?: (activeIds: Set<EventId>) => void;
   },
@@ -88,13 +88,16 @@ export function cancelStaleEntries(
   for (const [id, handle] of s.alertTimers) {
     if (!activeIds.has(id)) {
       if (callbacks?.onAlertCancel) {
-        callbacks.onAlertCancel(id, s.alertTimers);
+        callbacks.onAlertCancel(id, s);
       } else {
         clearTimeout(handle);
         s.alertTimers.delete(id);
       }
       console.debug("[scheduler] Cancelled alert timer for removed event");
     }
+  }
+  for (const id of s.alertOwners.keys()) {
+    if (!activeIds.has(id)) s.alertOwners.delete(id);
   }
   // Title timers
   for (const [id, handle] of s.titleTimers) {

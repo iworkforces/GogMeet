@@ -3,6 +3,8 @@ import type { EventId } from "../../src/domain/entities/brand.js";
 import type { MeetingEvent } from "../../src/domain/entities/meeting-event.js";
 import { asTestEventId, createMockEvent } from "../helpers/test-utils.js";
 import type { SchedulerRuntime } from "../../src/main/scheduler/runtime.js";
+import { DEFAULT_SETTINGS } from "../../src/domain/entities/settings.js";
+import { createSchedulerState } from "../../src/main/scheduler/state/index.js";
 import { schedulerTestContext } from "../helpers/scheduler-runtime.js";
 
 vi.mock("../../src/main/windows/alert-window.js", () => ({
@@ -58,7 +60,12 @@ describe("scheduleAlertTimer", () => {
     scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     vi.advanceTimersByTime(delay);
-    expect(showAlert).toHaveBeenCalledWith(event, expect.any(Function), undefined);
+    expect(showAlert).toHaveBeenCalledWith(
+      event,
+      expect.any(Function),
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it("calls showAlert for events without meetUrl", () => {
@@ -67,7 +74,12 @@ describe("scheduleAlertTimer", () => {
     scheduleAlertTimer(runtime, event, delay, Date.now() + 30 * 60_000);
 
     vi.advanceTimersByTime(delay);
-    expect(showAlert).toHaveBeenCalledWith(event, expect.any(Function), undefined);
+    expect(showAlert).toHaveBeenCalledWith(
+      event,
+      expect.any(Function),
+      undefined,
+      expect.any(Function),
+    );
     expect(event.meetUrl).toBeUndefined();
   });
 
@@ -139,6 +151,163 @@ describe("scheduleAlertTimer", () => {
     vi.advanceTimersByTime(60_000); // 120000 - 60000 = 60000
     expect(alertTimers.has(event.id)).toBe(false);
   });
+
+  it.each([
+    ["exact quiet start", 22, 0, "22:00", "07:00", true],
+    ["overnight after midnight", 2, 0, "22:00", "07:00", true],
+    ["exact quiet end", 7, 0, "22:00", "07:00", false],
+    ["equal endpoints", 22, 0, "22:00", "22:00", false],
+    ["invalid start", 22, 0, "invalid", "07:00", false],
+    ["invalid end", 22, 0, "22:00", "invalid", false],
+  ])("uses live quiet hours at %s", (_label, hour, minute, start, end, quiet) => {
+    vi.setSystemTime(new Date(2026, 0, 2, hour, minute));
+    runtime = schedulerTestContext({
+      ...DEFAULT_SETTINGS,
+      quietHoursEnabled: true,
+      quietHoursStart: start,
+      quietHoursEnd: end,
+    }).runtime;
+    const event = makeEvent();
+    const endMs = Date.now() + 30 * 60_000;
+    scheduleAlertTimer(runtime, event, 0, endMs);
+    vi.advanceTimersByTime(0);
+
+    expect(runtime.state.alertTimers.has(event.id)).toBe(false);
+    expect(runtime.state.alertFiredEvents.get(event.id)).toBe(endMs + 15 * 60_000);
+    expect(showAlert).toHaveBeenCalledTimes(quiet ? 0 : 1);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+  });
+
+  it("reads changed settings at fire and again when a queued alert is presented", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 21, 59));
+    let settings = { ...DEFAULT_SETTINGS, quietHoursEnabled: false };
+    runtime = schedulerTestContext(() => settings).runtime;
+    const event = makeEvent();
+    scheduleAlertTimer(runtime, event, 0, Date.now() + 30 * 60_000);
+    vi.advanceTimersByTime(0);
+    const canShow = vi.mocked(showAlert).mock.calls[0]?.[3];
+    expect(canShow?.()).toBe(true);
+    settings = {
+      ...settings,
+      quietHoursEnabled: true,
+      quietHoursStart: "22:00",
+      quietHoursEnd: "07:00",
+    };
+    vi.setSystemTime(new Date(2026, 0, 2, 22, 0));
+    expect(canShow?.()).toBe(false);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+    expect(runtime.state.alertFiredEvents.has(event.id)).toBe(true);
+  });
+
+  it("uses the live settings getter when the timer fires rather than the scheduling snapshot", () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 21, 59));
+    let settings = { ...DEFAULT_SETTINGS, quietHoursEnabled: false };
+    runtime = schedulerTestContext(() => settings).runtime;
+    const event = makeEvent();
+    const endMs = Date.now() + 30 * 60_000;
+    scheduleAlertTimer(runtime, event, 120_000, endMs);
+    settings = {
+      ...settings,
+      quietHoursEnabled: true,
+      quietHoursStart: "22:00",
+      quietHoursEnd: "07:00",
+    };
+    vi.advanceTimersByTime(60_000);
+    expect(showAlert).not.toHaveBeenCalled();
+    expect(runtime.state.alertFiredEvents.get(event.id)).toBe(endMs + 15 * 60_000);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+  });
+
+  it("stale timer callback cannot remove successor handle or mark its alert fired", () => {
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    const event = makeEvent();
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
+    const staleCallback = spy.mock.calls[0]?.[0];
+    scheduleAlertTimer(runtime, event, 180_000, Date.now() + 40 * 60_000);
+    const successorHandle = runtime.state.alertTimers.get(event.id);
+    spy.mockRestore();
+    if (typeof staleCallback !== "function") throw new Error("missing alert callback");
+    staleCallback();
+    expect(runtime.state.alertTimers.get(event.id)).toBe(successorHandle);
+    expect(runtime.state.alertFiredEvents.has(event.id)).toBe(false);
+    expect(showAlert).not.toHaveBeenCalled();
+  });
+
+  it("old dismissal cannot cancel a successor browser timer after same-id reschedule", () => {
+    const event = makeEvent();
+    scheduleAlertTimer(runtime, event, 0, Date.now() + 30 * 60_000);
+    vi.advanceTimersByTime(0);
+    const oldDismissal = vi.mocked(showAlert).mock.calls[0]?.[1];
+    const oldCanShow = vi.mocked(showAlert).mock.calls[0]?.[3];
+    const browserHandle = setTimeout(() => undefined, 300_000);
+    runtime.state.timers.set(event.id, browserHandle);
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 40 * 60_000);
+    oldDismissal?.();
+    expect(oldCanShow?.()).toBe(false);
+    expect(runtime.state.timers.get(event.id)).toBe(browserHandle);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+  });
+
+  it("old presentation cannot revive after a same-id, same-time successor fires", () => {
+    const event = makeEvent();
+    const endMs = Date.now() + 30 * 60_000;
+    scheduleAlertTimer(runtime, event, 0, endMs);
+    vi.advanceTimersByTime(0);
+    const oldDismissal = vi.mocked(showAlert).mock.calls[0]?.[1];
+    const oldCanShow = vi.mocked(showAlert).mock.calls[0]?.[3];
+
+    scheduleAlertTimer(runtime, event, 0, endMs);
+    vi.advanceTimersByTime(0);
+    const currentDismissal = vi.mocked(showAlert).mock.calls[1]?.[1];
+    const currentCanShow = vi.mocked(showAlert).mock.calls[1]?.[3];
+    const browserHandle = setTimeout(() => undefined, 300_000);
+    runtime.state.timers.set(event.id, browserHandle);
+
+    expect(oldCanShow?.()).toBe(false);
+    oldDismissal?.();
+    expect(runtime.state.timers.get(event.id)).toBe(browserHandle);
+    expect(currentCanShow?.()).toBe(true);
+    currentDismissal?.();
+    expect(runtime.state.timers.has(event.id)).toBe(false);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(true);
+  });
+
+  it("cancel revokes a fired alert presentation before a browser timer is dismissed", () => {
+    const event = makeEvent();
+    scheduleAlertTimer(runtime, event, 0, Date.now() + 30 * 60_000);
+    vi.advanceTimersByTime(0);
+    const dismissal = vi.mocked(showAlert).mock.calls[0]?.[1];
+    const canShow = vi.mocked(showAlert).mock.calls[0]?.[3];
+    const browserHandle = setTimeout(() => undefined, 300_000);
+    runtime.state.timers.set(event.id, browserHandle);
+
+    cancelAlertTimer(event.id, runtime.state);
+    expect(canShow?.()).toBe(false);
+    dismissal?.();
+    expect(runtime.state.timers.get(event.id)).toBe(browserHandle);
+  });
+
+  it("stopped lifecycle timer and old dismissal cannot affect successor state", () => {
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    const event = makeEvent();
+    scheduleAlertTimer(runtime, event, 0, Date.now() + 30 * 60_000);
+    const staleCallback = spy.mock.calls[0]?.[0];
+    vi.advanceTimersByTime(0);
+    const dismissal = vi.mocked(showAlert).mock.calls[0]?.[1];
+    const canShow = vi.mocked(showAlert).mock.calls[0]?.[3];
+    runtime.lifecycleGeneration += 1;
+    runtime.state = createSchedulerState();
+    scheduleAlertTimer(runtime, event, 120_000, Date.now() + 40 * 60_000);
+    const successorHandle = runtime.state.alertTimers.get(event.id);
+    spy.mockRestore();
+    if (typeof staleCallback !== "function") throw new Error("missing alert callback");
+    staleCallback();
+    dismissal?.();
+    expect(canShow?.()).toBe(false);
+    expect(runtime.state.alertTimers.get(event.id)).toBe(successorHandle);
+    expect(runtime.state.alertFiredEvents.has(event.id)).toBe(false);
+    expect(runtime.state.firedEvents.has(event.id)).toBe(false);
+  });
 });
 
 describe("cancelAlertTimer", () => {
@@ -163,7 +332,7 @@ describe("cancelAlertTimer", () => {
     scheduleAlertTimer(runtime, event, 120_000, Date.now() + 30 * 60_000);
     expect(alertTimers.has(event.id)).toBe(true);
 
-    cancelAlertTimer(event.id, alertTimers);
+    cancelAlertTimer(event.id, runtime.state);
     expect(alertTimers.has(event.id)).toBe(false);
 
     // Timer should not fire after cancellation
@@ -172,7 +341,7 @@ describe("cancelAlertTimer", () => {
   });
 
   it("is safe to call with non-existent eventId (no-op)", () => {
-    expect(() => cancelAlertTimer(asTestEventId("nonexistent"), alertTimers)).not.toThrow();
+    expect(() => cancelAlertTimer(asTestEventId("nonexistent"), runtime.state)).not.toThrow();
     expect(alertTimers.size).toBe(0);
   });
 });
